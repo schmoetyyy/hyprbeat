@@ -1,8 +1,5 @@
-# Rust build output
 /target
-
-# direnv cache (the .envrc file itself should be committed)
-.direnv/
-
-# Nix build result symlink (from `nix build`)
-result
+/.direnv
+/result
+*.png
+!docs/img/*.png

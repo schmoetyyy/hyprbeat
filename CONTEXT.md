@@ -5,11 +5,17 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: architecture session, amendment 4 (product rename
-> beatpaper → hyprbeat throughout: §1, §3.1 diagram, §5.2/§6 XDG paths, §8 socket,
-> D-09, §10/§12 refs; new D-19 records the choice + hyprpaper namespace
-> awareness).
-> **Current phase**: 0 — architecture (DONE). Next: phase 1.
+> **Last updated**: 2026-11-12 — **phase 1 → DONE** (validation run 3 + §3.6
+> spot-checks complete, dev machine, Hyprland 0.57.1). Exit criteria and
+> probes all green: gradient live at 100 % (~27.4 fps @ 30 cap), test card
+> sharp at 100 % + 125 %, headless PNG confirmed, input probes PASS on an
+> empty workspace (pointer/buttons, 4596 relative deltas, 65 keys — D-28).
+> §3.6 measured: visible 0.7–1.0 % of one core (≤ 2 % PASS), RAM 53 MB
+> (≤ 150 MB PASS), cold start ~0.3 s (PASS); **occluded ≈ visible ≈ 1 % — the
+> "~0 % free pause" does not exist on Hyprland 0.57.1** (callbacks keep
+> flowing under verified true fullscreen — D-29/Q-7; phase 7 inherits real
+> pause duty).
+> **Current phase**: 1 — **DONE**. Next: phase 2 (audio engine, §10 row 2).
 
 ---
 
@@ -188,11 +194,12 @@ Notes:
   no flicker. (INVARIANT I-05)
 
 Keyboard interactivity: use **`on_demand`**, not `exclusive` — `exclusive`
-would steal the keyboard from the whole session. Verify Hyprland's handling of
-`on_demand` on background-layer surfaces in phase 1; if background-layer kbd
-grabbing is unreliable, the fallback design is a **Hyprland keybind that
-focuses the surface via a custom protocol or `hyprctl` dispatch** — decide in
-phase 1 and record the outcome here.
+would steal the keyboard from the whole session. **Phase-1 outcome (probe,
+2026-11-12, Hyprland 0.57.1): WORKS FULLY on the background layer** —
+`wl_keyboard.enter`/`leave` delivered, focus AUTO-GRANTED when the surface
+maps on an empty workspace, and 65 key events delivered while focus held.
+Keys go to any window that takes focus — exactly the T3 pause behaviour we
+want. No fallback needed.
 
 ### 3.5 Rendering architecture
 
@@ -203,8 +210,12 @@ phase 1 and record the outcome here.
   atlas, one bind group → one draw call per layer batch.
 - **Colors as instance attributes** → theming is free per-quad (§6).
 - **Frame-callback driven**: render only when the compositor sends frame
-  callbacks. When fully occluded (fullscreen window on top), Hyprland stops
-  sending them → the wallpaper costs ~0. This is our "free pause".
+  callbacks. ~~When fully occluded, Hyprland stops sending them → cost ~0
+  ("free pause").~~ **[FALSIFIED on Hyprland 0.57.1 — D-29]**: under verified
+  true fullscreen (opaque window, bar killed) callbacks keep arriving at
+  ~the full output rate; occluded cost ≈ visible cost ≈ 1 %. The real pause
+  is the phase-7 mode switch (stop requesting frames / detach);
+  occlusion-pause remains a sway/niri portability question (verify later).
 - **Idle mode**: in WALLPAPER_DEMO, self-throttle to `target_fps_idle`
   (default 30) by skipping frames between callbacks.
 - Text: `cosmic-text` (or `glyphon`) rendered into atlas updates; avoid
@@ -222,7 +233,7 @@ numbers. Measured on the dev machine (discrete GPU + iGPU), recorded in the
 
 | Scenario | Budget |
 |---|---|
-| DEMO, fully occluded | ~0% CPU (no frame callbacks arriving — verify!) |
+| DEMO, fully occluded | **measured ≈ visible ≈ 0.7–1.0 %** — Hyprland 0.57.1 keeps sending callbacks under true fullscreen (D-29); "~0 %" withdrawn, real pause arrives with phase-7 mode switching |
 | DEMO, visible @ 30 fps | ≤ 2% of one core |
 | PLAYING | frame time ≤ 4 ms on iGPU-class hardware; ≤ 15% of one core |
 | Input → sound → photon | ≤ 25 ms at 60 Hz (via `--latency-test`, phase 2) |
@@ -252,6 +263,9 @@ or record a dated waiver in §14.
 
 Everything else std-only where possible. Keep the dependency tree small — this
 runs 24/7 on people's desktops.
+
+*Phase-1 status: versions are pinned in `Cargo.toml` with a committed
+`Cargo.lock` (see D-25 for the realized stack and the wgpu-30 specifics).*
 
 ---
 
@@ -601,13 +615,18 @@ scoring math (§11 I-09), never in the live game.
   only, clamped (D-17). Phase 1 MUST exit having tested 100% AND 125%.
 - **Minimum compositor**: expect Hyprland ≥ 0.41 (fractional-scale v1),
   layer-shell v4, `wp_viewporter`, `zwp_relative_pointer_v1` (raw input,
-  §6 `[input]`; fallback `raw_input = false`) — confirm actual minimums in
-  phase 1 and record them HERE.
+  §6 `[input]`; fallback `raw_input = false`). **Confirmed working on the dev
+  machine: Hyprland 0.57.1** (Nix build, 2026-11-12 — viewporter,
+  fractional-scale, background layer-shell all bind; 165 Hz output). Versions
+  below 0.57.1 remain untested.
 - **Cursor**: hide the compositor cursor over the surface when PLAYING
   (`wl_pointer` hide via `set_cursor` empty) and draw our own — osu! style.
   In PLAYING, consume `zwp_relative_pointer_v1` motion deltas for raw-input
   aim (§6 `[input]`); fall back to absolute `wl_pointer` position when
   `raw_input = false`. Pointer is always passthrough in wallpaper/demo mode.
+  **Phase-1 probe finding (2026-11-12, Hyprland 0.57.1, empty workspace):
+  pointer enter/button AND relative deltas all reach the background layer —
+  raw input confirmed viable; `raw_input = true` stays the default (D-28).**
 - **Debug tooling**: `WAYLAND_DEBUG=1` env for protocol traces; `wgpu`
   validation on in dev builds; `--headless` flag (no layer-shell, offscreen
   render to PNG) for CI and quick iteration without touching the live desktop.
@@ -637,6 +656,16 @@ scoring math (§11 I-09), never in the live game.
 | D-17 | Output scale follows the compositor; user config exposes only `ui_scale` and a perf-only `[render] scale` override (clamped) | Wayland-correct: client-side "DPI" settings fight the compositor → blur / mis-sized rendering. |
 | D-18 | Mouse speed = software sensitivity multiplier on pointer deltas (NOT a DPI setting); hardware DPI is the user's mouse config. Default `raw_input = true` bypasses compositor acceleration for predictable aim. Sensitivity applies only in PLAYING, never in wallpaper passthrough. | Wayland clients cannot set mouse DPI (that's hardware/libinput). What rhythm players want — "1 pad unit = N osu!px" — is a sensitivity multiplier; raw input removes inter-compositor aim inconsistency. |
 | D-19 | Product name is `hyprbeat` (was working title "beatpaper"). Settled pre-code while the rename is free. | Satisfies D-09/I-04 (no "osu"). Aware of namespace overlap with Hyprland's `hyprpaper` (Vaxry's wallpaper daemon — different function: rhythm game vs static wallpaper); accepted the association as net-positive ecosystem fit. Do not re-litigate without a concrete conflict (trademark claim or documented user confusion). |
+| D-20 | Phase-1 CLI is a minimal hand-rolled parser (`--headless --timeout --size --scale --out --testcard --probe --fps`); clap still lands in phase 5 with the config flags (§6) | §4 "keep the dependency tree small"; every phase-1 flag is a dev/diagnostic flag |
+| D-21 | Live rendering = one wgpu surface per output created over raw Wayland handles; fractional scale = buffer `round(logical×scale)` mapped 1:1 onto logical size via `wp_viewporter` source/dest; without viewporter, fall back to `wl_surface.set_buffer_scale(round(scale))` + warn. The wgpu 30 instance is handed the `wl_display` (`InstanceDescriptor::display`) so the GLES backend can present on Wayland. | Pixel-correct fractional scaling (D-17/I-11); wgpu-30-specific requirement discovered during the phase-1 build |
+| D-22 | Wallpaper surfaces default to an EMPTY input region + `keyboard_interactivity=none` (pointer passthrough, I-13); `--probe` temporarily maps full input + `on_demand` to measure Q-1/Q-2 from the live desktop | Phase 1 must never eat desktop input; the probe doubles as the §14 instrument |
+| D-23 | Frame loop: render only inside frame callbacks; idle cap by skipping with an EMPTY commit (some compositors only fire callbacks after a commit); a 250 ms watchdog re-requests callbacks (occlusion ⇒ callbacks stop ⇒ ~0 % CPU is expected and logged once) | §3.5 made concrete + self-healing; whether the empty commits are actually needed on Hyprland is Q-3 |
+| D-24 | Live mode defaults to a 120 s safety `--timeout` (0 disables; probe defaults 10 s) | §12.3 "a broken build can't strand the user"; retire the default in phase 7 when real mode switching exists |
+| D-25 | Toolchain pinned at phase-1 scaffold: edition 2024 / rust-version 1.85; wgpu 30 (vulkan+gles features only), sctk 0.21.1, wayland-client 0.31 with `system`+`dlopen` (raw `wl_display`/`wl_surface` pointers for wgpu surface creation; libwayland dlopened at runtime), wayland-protocols 0.32 (`staging`+`unstable`), calloop 0.14 + calloop-wayland-source 0.4; `Cargo.lock` committed | §4 "pin versions at phase-1 scaffold"; wgpu 30 API deltas (present moved to `Queue`, sRGB targets want linear shader input) were absorbed during the build |
+| D-26 | First frame after a configure is presented **eagerly** (request callback → present, in that order); the starvation watchdog distinguishes "never rendered" (present one — deadlock fallback) from "rendered before, starved" (re-arm by request+commit or a bare commit, never a forced second concurrent callback, never a buffer present — occlusion must stay ~0 cost) | Live finding 2026-11-12: Hyprland does not composite a layer surface that has never attached a buffer, so no frame callback ever arrives to trigger frame 1 (observed: rendered=0, watchdog_rearms=20 for 10 s); a bare `wl_surface.frame` re-request without a following commit arms nothing. Also removes the double-arm hazard: each on_frame_done begets exactly one request, so a forced second pending callback would persist forever. |
+| D-27 | **[SUPERSEDED by D-28 — probe conclusions (b) and (c) were confounded artifacts; (a) stands]** Phase-1 input probe v1 (Hyprland 0.57.1): (a) background-layer `on_demand` keyboard interactivity is protocol-supported; (b) relative pointer delivers nothing → `raw_input = false`; (c) zero pointer events observed | Probe v1 ran with a terminal window on the desktop, which correctly captured all pointer/keyboard input (windows sit above the background layer). (a) was confirmed by run 3; (b)/(c) were measurement error |
+| D-28 | Probe v2 (2026-11-12, Hyprland 0.57.1, EMPTY workspace): background-layer surfaces receive FULL input — `wl_pointer` enter/button/motion, `zwp_relative_pointer_v1` deltas (4596 events in 10 s), sustained keyboard delivery (65 key events under auto-granted focus). `raw_input = true` stays the v0.1 default as designed; no `Layer::Bottom` workaround needed. Protocol for all future input probes: run on an EMPTY workspace (windows above the background layer legitimately consume input — that IS the wallpaper-mode passthrough working). | Corrects D-27(b)/(c); best-case outcome for §6 `[input]` and the §3.4 T1 "click desktop → play" transition — both mechanisms confirmed deliverable |
+| D-29 | Hyprland 0.57.1 does **not** stop frame callbacks to a background-layer surface under true fullscreen occlusion (run 6: EasyEffects, opaque, `fullscreen: 2` verified via `hyprctl activewindow`, waybar killed, 35 s) — callbacks continued at ~165 Hz (two reports dipped to ~132/106 Hz during the window's startup churn; never stopped), rendered=137/5 s, watchdog_rearms=0, CPU 0.8–1.0 % ≈ visible cost. §3.5 free-pause assumption falsified on this machine; §3.6 occluded budget amended to ≈ visible (≤ 2 %); real pause = phase-7 mode switch (stop requesting frames). Caveat: gpu-screen-recorder was running during the test (capture may force full-scene compositing — optional retest without it) | Run 6 of the §3.6 spot-checks; runs 1–5 hit confounds (maximize-variant keybind, translucent browser/kitty, one exit-127 no-op run) |
 
 ---
 
@@ -645,7 +674,7 @@ scoring math (§11 I-09), never in the live game.
 | Phase | Scope | Exit criteria | Status |
 |---|---|---|---|
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
-| **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ⬜ NEXT |
+| **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
 | **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ⬜ |
 | **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ⬜ |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
@@ -689,8 +718,9 @@ The dev machine runs NixOS + Hyprland. Implications:
 - **No rustup.** Use the Rust toolchain from nixpkgs inside a flake devshell.
   Mixing rustup toolchains with nix-provided system libs is THE classic
   NixOS Rust link failure — don't do it.
-- **Devshell** (`flake.nix`, created in phase 1) — starting sketch, validate on
-  the machine in phase 1:
+- **Devshell** (`flake.nix` — written in phase 1 as the sketch below refined
+  for the realized stack; syntax checked offline, `nix develop` still to be
+  validated on the machine):
 
 ```nix
 # flake.nix (devshell sketch — validate in phase 1)
@@ -755,12 +785,16 @@ absolute XDG paths** (§5.2) and never relative to the repo. Conventions:
 ### 12.3 General tooling
 
 - **Rust**: stable, edition 2021 (bump to 2024 in phase 1 if toolchain current).
+  *Phase-1 status: edition 2024 on rustc 1.99 — done.*
 - **Dev loop on Hyprland**: `cargo run` in a TTY session or from a terminal —
   the surface appears behind everything immediately; kill with `hyprbeat-ctl
   quit` or `--timeout <s>` dev flag so a broken build can't strand the user
-  (add `--timeout` in phase 1!). Also test on sway for layer-shell compat.
+  (`--timeout` is implemented — default 120 s in live mode, 0 disables, D-24;
+  phase-1 exit-criteria runner: `dev/validate-phase1.sh`). Also test on sway
+  for layer-shell compat.
 - **CI (phase 3+)**: `cargo fmt --check`, `cargo clippy -- -D warnings`,
   `cargo test` (parser + rules + slider math are pure — no GPU needed).
+  *Phase-1 status: all three gates already pass offline (27 tests).*
 - **Benchmarks** (phase 2+): criterion for clock math + slider LUT; manual
   latency measurement via `--latency-test` flag (tap-to-sound offset report).
 - **Logging**: `tracing` + `tracing-subscriber`, `RUST_LOG=hyprbeat=debug`.
@@ -794,12 +828,52 @@ adds the new one, and updates dependent sections.
 
 ## 14. Open questions
 
-- **Q-1 (verify phase 1)**: does `on_demand` keyboard interactivity actually
-  work on background-layer surfaces in Hyprland / sway? (§3.4 — fallback:
-  Hyprland keybind + `hyprctl` dispatch focusing the surface.)
-- **Q-2 (verify phase 1)**: does `zwp_relative_pointer_v1` deliver motion
-  deltas to a background-layer surface with input region ON? (§6 `[input]`
-  `raw_input` — fallback: ship defaulting to `raw_input = false`.)
+- **Q-1 (verify phase 1)**: ~~does `on_demand` keyboard interactivity actually
+  work on background-layer surfaces in Hyprland / sway?~~ **ANSWERED
+  2026-11-12 (Hyprland 0.57.1): YES, fully** — enter/leave delivered, focus
+  auto-granted at map on an empty workspace, 65 key events delivered while
+  focus held (probe v2). §3.4 updated; no fallback needed.
+- **Q-2 (verify phase 1)**: ~~does `zwp_relative_pointer_v1` deliver motion
+  deltas to a background-layer surface with input region ON?~~ **ANSWERED
+  2026-11-12 (Hyprland 0.57.1, empty workspace): YES** — 4596 relative-motion
+  events in a 10 s probe. The run-2 "NO" was a confound (terminal window
+  captured the pointer). `raw_input = true` stays the v0.1 default (D-28).
+- **Q-3 (new, phase 1)**: ~~do frame callbacks keep arriving on Hyprland for a
+  background surface that commits an EMPTY buffer between throttled frames?~~
+  **ANSWERED 2026-11-12 (dev machine, Hyprland, 165 Hz output): YES** — run 2
+  logged skipped=824 empty-commit skips over 5 s with callbacks continuous at
+  ~165 Hz and watchdog_rearms=0. The empty-commit skip path works on Hyprland;
+  keep it (it is the portability belt for compositors that do require a
+  commit per callback). The D-26 half (never-attached buffer ⇒ no callbacks)
+  stays recorded in the decision log.
+- **Q-4 (new, phase 1)**: hybrid-GPU boxes — the adapter is currently picked
+  without a compatible surface (phase-1 simplification, see `render::Gpu`
+  docs); if validation ever shows a black surface on dGPU/iGPU setups, select
+  the adapter after the first surface exists (sctk's wgpu example pattern).
+- **Q-5 (new, 2026-11-12, validation run 1)**: ~~the user answered **"no"** to
+  "does the headless test card look geometric?"~~ **RESOLVED same day:
+  prompt misunderstanding** — the user read the question as being about the
+  desktop background, not a file to open. On the rerun (prompt reworded:
+  "open it in an image viewer") the answer was **"y"** — border, grid, rings,
+  checker strip, sweep band all present and straight. No renderer defect;
+  the RADV-produced PNG matches the committed reference.
+- **Q-6 (new, 2026-11-12, probe v1)**: ~~do POINTER events (enter / button /
+  absolute motion) reach a background-layer surface on Hyprland 0.57.1 at
+  all?~~ **ANSWERED 2026-11-12 (probe v2, empty workspace): YES** — pointer
+  entered, 25 buttons, continuous motion + relative deltas. Probe v1's
+  zero-pointer result was the terminal-window confound (windows above the
+  background layer legitimately consume input — that is wallpaper-mode
+  passthrough working as designed). Lesson recorded in D-28: input probes
+  must run on an empty workspace; `dev/validate-phase1.sh` instructions
+  updated accordingly.
+- **Q-7 (new, 2026-11-12, §3.6 spot-check run 6)**: ~~do frame callbacks stop
+  arriving when an opaque window truly fullscreens over the background layer
+  (the §3.5 "free pause")?~~ **ANSWERED 2026-11-12 (Hyprland 0.57.1): NO** —
+  fullscreen verified (`fullscreen: 2`), waybar killed, opaque EasyEffects
+  covering the output for 35 s: callbacks continued (~165 Hz; rendered=137
+  per 5 s, watchdog_rearms=0), CPU stayed 0.8–1.0 %. Recorded as D-29;
+  §3.5/§3.6 amended; real pause duty moved to phase 7. (gpu-screen-recorder
+  was running; optional retest without it.)
 
 ---
 
