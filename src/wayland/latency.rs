@@ -114,7 +114,9 @@ impl LatencyStats {
     pub fn print(&self, callback_period_ms: f64) {
         println!("\n=== hyprbeat latency report (CONTEXT.md §3.6 / §12.3) ===");
         println!("taps recorded               : {}", self.taps);
-        println!("callback period (buffer)     : {callback_period_ms:.2} ms (device-chosen)");
+        println!(
+            "callback period (buffer)     : {callback_period_ms:.2} ms (observed at runtime; --buffer tunes)"
+        );
         println!(
             "tap  → mixed into buffer     : p50 {:.2} ms   p95 {:.2} ms",
             self.to_mixed_p50, self.to_mixed_p95

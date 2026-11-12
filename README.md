@@ -70,6 +70,10 @@ a phase-1 development guard and will retire when real mode switching lands
                     audio stream; decodes cache in ~/.cache/hyprbeat/decoded/
 --volume V          master volume 0.0–1.0 [default: 0.7]
 --offset-ms N       universal audio offset in ms [default: 0]
+--buffer N          output buffer in frames — the latency floor of the
+                    input→sound budget; 0 = device default (measured 32 ms
+                    on PipeWire); falls back to device default when refused
+                    [default: 256 ≈ 5.3 ms at 48 kHz]
 --no-audio          force the degraded wall-clock path (amber band appears)
 --latency-test      input → sound → photon tap report (empty workspace; click
                     the desktop once for keyboard focus, then tap keys)

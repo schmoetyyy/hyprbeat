@@ -1480,6 +1480,7 @@ fn build_timing(args: &Args) -> TimingState {
             volume: args.volume,
             offset_ms: args.offset_ms,
             lead_in_ms: 0.0,
+            buffer_frames: args.buffer_frames,
         }) {
             Ok(engine) => TimingState::Audio(engine),
             Err(err) => {

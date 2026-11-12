@@ -86,6 +86,12 @@ pub struct StartOptions<'a> {
     /// Lead-in before song t=0 (ms). Phase 2 uses 0; beatmap `AudioLeadIn`
     /// arrives in phase 3.
     pub lead_in_ms: f64,
+    /// Requested output buffer in frames; 0 = device default (D-37). The
+    /// device default measured 32 ms/1536 frames on the dev machine — the
+    /// input→sound budget (§3.6, ≤ 25 ms) cannot fit inside a 32 ms period,
+    /// so the engine requests a small fixed buffer and falls back to the
+    /// device default only if the host refuses.
+    pub buffer_frames: u32,
 }
 
 impl AudioEngine {
@@ -106,7 +112,9 @@ impl AudioEngine {
                     .map_err(AudioStartError::Decode)?;
                 tracing::info!(
                     path = %path.display(),
-                    cache = if hit { "hit" } else { "miss" },
+                    // `%` (Display): string fields print bare (`cache=miss`) so
+                    // log greps and humans read them without quotes (D-38).
+                    cache = %(if hit { "hit" } else { "miss" }),
                     rate = decoded.rate,
                     channels = decoded.channels,
                     duration_ms = decoded.duration_ms() as u64,
@@ -116,9 +124,10 @@ impl AudioEngine {
             }
         };
 
-        // -- output config (D-30: native rate first) --------------------------
+        // -- output config (D-30: native rate first; D-37: small fixed buffer) --
         let want_rate = decoded_music.as_ref().map(|d| d.rate).unwrap_or(48_000);
-        let (config, stream_rate, out_channels) = pick_output_config(&device, want_rate)?;
+        let (mut config, stream_rate, out_channels) =
+            pick_output_config(&device, want_rate, opts.buffer_frames)?;
 
         // -- music at STREAM rate ---------------------------------------------
         let music = decoded_music.map(|d| {
@@ -156,29 +165,31 @@ impl AudioEngine {
         ));
         mixer.set_volume(opts.volume);
 
-        let data_callback = {
-            let mixer = mixer.clone();
-            let shared = shared.clone();
-            let channels = out_channels as usize;
-            move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
-                // I-02: only atomics + buffer writes live here (see mixer docs)
-                let frames = (data.len() / channels) as u64;
-                let start = shared.samples.load(Ordering::Relaxed);
-                mixer.mix_into(data, start, frames);
-                shared.samples.fetch_add(frames, Ordering::Relaxed);
-            }
+        // D-37: try the requested config; if a FIXED buffer size is refused,
+        // retry once with the device default (never fatal — D-16). The actual
+        // callback geometry is observed at runtime and lands in the
+        // `--latency-test` report regardless of which branch won.
+        let requested_fixed = opts.buffer_frames > 0;
+        let mut buffer_desc = if requested_fixed {
+            format!("fixed-{}", opts.buffer_frames)
+        } else {
+            "device default".to_string()
         };
-        let error_callback = {
-            // RT context: store a flag, nothing else — the main tick degrades
-            // and logs from a safe context.
-            let shared = shared.clone();
-            move |_err: cpal::StreamError| {
-                shared.stream_failed.store(true, Ordering::Relaxed);
+        let stream = match build_stream(&device, &config, &mixer, &shared, out_channels) {
+            Ok(stream) => stream,
+            Err(err) if requested_fixed => {
+                tracing::warn!(
+                    requested = opts.buffer_frames,
+                    error = %err,
+                    "device refused the fixed buffer size — retrying with the device default (D-37)"
+                );
+                config = pick_output_config(&device, stream_rate, 0)?.0;
+                buffer_desc = "device default (fixed refused)".to_string();
+                build_stream(&device, &config, &mixer, &shared, out_channels)
+                    .map_err(|e| AudioStartError::StreamBuild(e.to_string()))?
             }
+            Err(err) => return Err(AudioStartError::StreamBuild(err.to_string())),
         };
-        let stream = device
-            .build_output_stream(&config, data_callback, error_callback, None)
-            .map_err(|e| AudioStartError::StreamBuild(e.to_string()))?;
         stream
             .play()
             .map_err(|e| AudioStartError::Play(e.to_string()))?;
@@ -188,7 +199,7 @@ impl AudioEngine {
             device = %device_name,
             rate = stream_rate,
             channels = out_channels,
-            buffer = "device default",
+            buffer = %buffer_desc,
             "audio stream started (f32)"
         );
         Ok(Self {
@@ -207,7 +218,8 @@ impl AudioEngine {
 }
 
 /// Choose an f32 output config at (in order of preference) `want_rate`, the
-/// device's default rate, 48 kHz, or the best the range allows.
+/// device's default rate, 48 kHz, or the best the range allows, with the
+/// buffer size from `buffer_frames` (0 = device default; D-37).
 ///
 /// Returns the cpal config plus the negotiated rate and channel count — the
 /// negotiated rate is what the clock counts and what the music must be
@@ -215,6 +227,7 @@ impl AudioEngine {
 fn pick_output_config(
     device: &cpal::Device,
     want_rate: u32,
+    buffer_frames: u32,
 ) -> Result<(StreamConfig, u32, u16), AudioStartError> {
     let ranges: Vec<cpal::SupportedStreamConfigRange> = device
         .supported_output_configs()
@@ -251,9 +264,45 @@ fn pick_output_config(
     let config = StreamConfig {
         channels: pick.channels(),
         sample_rate: SampleRate(rate),
-        buffer_size: cpal::BufferSize::Default,
+        buffer_size: if buffer_frames > 0 {
+            cpal::BufferSize::Fixed(buffer_frames)
+        } else {
+            cpal::BufferSize::Default
+        },
     };
     Ok((config, rate, pick.channels()))
+}
+
+/// Build the output stream with the phase-2 callbacks (I-02: the data
+/// callback mixes and advances the counter; the error callback only stores a
+/// flag). A separate fn so the D-37 fixed-buffer fallback can build a second
+/// stream with fresh closures (a failed build consumes the first pair).
+fn build_stream(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    mixer: &Arc<Mixer>,
+    shared: &Arc<SharedClock>,
+    channels: u16,
+) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    let mixer = mixer.clone();
+    let shared = shared.clone();
+    let channels = channels as usize;
+    let data_callback = move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+        // I-02: only atomics + buffer writes live here (see mixer docs)
+        let frames = (data.len() / channels) as u64;
+        let start = shared.samples.load(Ordering::Relaxed);
+        mixer.mix_into(data, start, frames);
+        shared.samples.fetch_add(frames, Ordering::Relaxed);
+    };
+    let error_callback = {
+        // RT context: store a flag, nothing else — the main tick degrades
+        // and logs from a safe context.
+        let shared = shared.clone();
+        move |_err: cpal::StreamError| {
+            shared.stream_failed.store(true, Ordering::Relaxed);
+        }
+    };
+    device.build_output_stream(config, data_callback, error_callback, None)
 }
 
 /// Decode + resample the embedded hitsounds to the stream rate.
@@ -277,6 +326,14 @@ fn load_hitsounds(rate: u32) -> Result<Vec<HitSound>, AudioStartError> {
 /// Default master volume (§6 `[general] volume`; config lands in phase 5).
 pub const DEFAULT_VOLUME: f32 = 0.7;
 
+/// Default output buffer in frames (D-37). Dev-machine measurement
+/// 2026-11-13: the device default was 1536 frames @ 48 kHz = 32 ms period —
+/// the §3.6 input→sound budget (p95 audible ≤ 25 ms) cannot fit inside a
+/// 32 ms period, so we request 256 frames (≈ 5.3 ms @ 48 kHz, ≈ 5.8 ms @
+/// 44.1 kHz) and fall back to the device default if the host refuses
+/// (`--buffer 0` forces the old behavior; `--buffer N` tunes).
+pub const DEFAULT_BUFFER_FRAMES: u32 = 256;
+
 // ---------------------------------------------------------------------------
 // tests (config selection math is pure enough to pin without a device)
 // ---------------------------------------------------------------------------
@@ -288,6 +345,20 @@ mod tests {
     #[test]
     fn default_volume_matches_spec() {
         assert_eq!(DEFAULT_VOLUME, 0.7, "§6 [general] volume default");
+    }
+
+    #[test]
+    fn default_buffer_fits_latency_budget() {
+        // D-37: 256 frames must stay well under the §3.6 25 ms audible
+        // budget at both common rates (two periods must fit with room for
+        // the tap-to-mixed leg).
+        for rate in [44_100, 48_000] {
+            let period_ms = DEFAULT_BUFFER_FRAMES as f64 * 1000.0 / rate as f64;
+            assert!(
+                period_ms < 7.0,
+                "buffer period at {rate} Hz is {period_ms:.2} ms — too large"
+            );
+        }
     }
 
     #[test]

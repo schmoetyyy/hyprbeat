@@ -5,9 +5,9 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-13 — **phase 2 → CODE COMPLETE, awaiting dev-machine
-> validation** (`dev/validate-phase2.sh`; the 2026-11-12 session built the audio
-> engine:
+> **Last updated**: 2026-11-13 — **phase 2 → code complete; dev-machine
+> validation run 1 = 9 pass / 4 fail → root-caused and fixed, awaiting run 2**
+> (2026-11-12 session built the audio engine:
 > cpal raw callback as the clock (§3.3, I-01), symphonia decode + SHA-256
 > cache, RT-safe mixer with SPSC sound queue, degraded wall-clock path
 > (D-16) with an amber shader band as the I-12 stand-in, SIGUSR1/2 pause /
@@ -20,11 +20,20 @@
 > `cargo fmt --check` re-run green. Full clippy/test re-run happens on the dev
 > machine as validate-phase2.sh step 0b (this sandbox was recycled and lost
 > root/alsa headers for a native rebuild).
+> Run-1 outcome (9 pass / 4 fail): build + all offline gates + headless PNG +
+> music sync (user y) + degraded amber band (user y) + pause/resume logged ✓;
+> 4 fails → two script bugs (tracing prints string fields QUOTED so `cache=miss`
+> greps missed; field greps like `rate=`/`song_ms=` missed on the dev machine's
+> redirected logs — script now ANSI-strips + is quote-tolerant + self-prints
+> full lines, D-38) and ONE real defect: the device default buffer is 32 ms
+> (1536 frames) so the §3.6 audible budget busted (p95 62.58 ms > 25 ms) → the
+> engine now requests a 256-frame fixed buffer with fallback (D-37, `--buffer`).
 > All offline gates pass in a build sandbox: 82 unit tests, fmt, clippy
 > -D warnings; benches: clock 6.7 ns, 512-frame mix 2.9 µs, 10 s resample 39 ms.)
-> **Current phase**: 2 — **IN PROGRESS (code complete; validation pending on
-> the dev machine)**. Next: run `dev/validate-phase2.sh` on the dev machine,
-> record results, then phase 3 (beatmap parsing, §10 row 3).
+> **Current phase**: 2 — **IN PROGRESS (code complete; validation run 2
+> pending on the dev machine)**. Next: re-run `dev/validate-phase2.sh` after
+> applying the 2026-11-13 fix drop, record results, then phase 3 (beatmap
+> parsing, §10 row 3).
 
 ---
 
@@ -692,6 +701,8 @@ scoring math (§11 I-09), never in the live game.
 | D-34 | Bundled hitsounds are ORIGINAL: `dev/gen_assets.py` (committed, seeded, deterministic) synthesized `assets/hitsounds/{normal,clap,whistle,finish}.wav` (16-bit PCM 44.1k mono) and `assets/test-tone.wav` (12 s, 440 Hz with 2 Hz amplitude beats — the sync/pause validation signal). Embedded via `include_bytes!`. Provenance audit = script + `assets/hitsounds/NOTICE.md` (I-03) | Zero third-party audio bytes in the repo; the test tone doubles as an audible+visible sync reference for validation |
 | D-35 | I-12 phase-2 stand-in: the degraded wall clock shows as a **pulsing amber band along the top edge of the shader output** (no text renderer exists until phase 8's cosmic-text). `--no-audio` forces the path for validation. The real "⚠ timing degraded — no audio" HUD string lands in phase 8; anything silent remains a bug | The invariant demands visibility NOW, not in phase 8; a shader band is cheap and unmissable |
 | D-36 | Criterion added as a dev-dependency ONLY (`default-features = false` + `cargo_bench_support`) with `benches/audio.rs` under `harness = false`; the release dependency tree is untouched (§4). A `src/lib.rs` facade exists so benches can import the modules (binary stays thin) | §12.3 mandates criterion benches for the clock math from phase 2 on; dev-dep-only keeps the shipped tree small |
+| D-37 | **Output buffer: request `BufferSize::Fixed(256)` by default** (≈5.3 ms @48 kHz), `--buffer N` CLI (16–8192, 0 = device default); if the host refuses a fixed size, fall back to the device default with a warn log — never fatal (D-16 posture). Rationale is measured, not vibes: validation run 1 on the dev machine negotiated a 32 ms / 1536-frame device default period, so the §3.6 input→sound budget (p95 audible ≤ 25 ms) was arithmetically unreachable (measured p95 62.58 ms = mixed 30.58 + period 32); this is Q-9's documented contingency engaged with data. The actual negotiated geometry is still observed at runtime (`frames_per_callback`) and printed by `--latency-test`, so run 2 verifies what PipeWire really gave us (Q-11) | The callback-rate cost is bounded by the mix bench (512-frame mix = 2.9 µs → 256-frame callbacks at ~187 Hz cost ≪ 1 % core); the budget is the point of the project (D-01) |
+| D-38 | **Log-format contract for validation greps** (learned in run 1): tracing-subscriber's default formatter prints non-message string fields Debug-QUOTED (`cache="miss"`) while numbers print bare; and on the dev machine's redirected logs even numeric field greps (`rate=`, `song_ms=`) matched nothing — consistent with ANSI escapes around field names/`=` (verified against tracing-subscriber 0.3.23 source: field name painted italic, `=` painted dimmed). Fixes, in force from now on: (a) log greps in dev scripts must be ANSI-stripped (`sed $'s/\x1b\[[0-9;]*[mK]//g'`) and quote-tolerant (`cache="?miss"?`); (b) string fields we grep for use the `%` Display sigil to print bare (`cache=%(...)` — music decoded line now does); (c) dev scripts print the FULL matched line on extraction failure so misses self-diagnose; (d) phase scripts keep their log dir when anything fails (path printed) | A grep that silently matches nothing turns a passing system into a FAIL with no evidence; run 1 burned a dev-machine round trip on exactly that |
 
 ---
 
@@ -701,7 +712,7 @@ scoring math (§11 I-09), never in the live game.
 |---|---|---|---|
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
-| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | 🔶 **IN PROGRESS — code complete 2026-11-12, awaiting dev-machine validation** (`dev/validate-phase2.sh`). Offline gates already green in a build sandbox: 82 unit tests (clock pause/rebase/lead-in/degrade, mixer sample accuracy + SPSC + diagnostics, decode roundtrip + cache corruption + resampler SNR/anti-alias, latency report math), `cargo fmt --check`, `cargo clippy -D warnings`, criterion benches (clock 6.7 ns, pause+resume 8.2 ns, 512-frame stereo mix 2.9 µs ≈ 0.03 % of its 10.7 ms period, 10 s stereo resample 39 ms). Remaining: live run on the dev machine (sync visible, cache miss→hit, scripted SIGUSR1/2 freeze+rebase, amber-band degraded path, `--latency-test` ≤ 25 ms). |
+| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | 🔶 **IN PROGRESS — code complete; dev-machine validation run 1 done 2026-11-13: 9 pass / 4 fail → fixed, run 2 pending.** Run 1: build+fmt+clippy+82 tests, headless PNG, music sync (user y), degraded amber band (user y), SIGUSR1/2 pause+resume logged — all PASS. 4 FAILs root-caused: (1–2) cache miss/hit greps — script bug, tracing prints string fields quoted (D-38; fixed: quote-tolerant + ANSI-strip + cache=% bare + deterministic cache wipe per run); (3) pause/rebase freeze math unreadable — same field-grep bug + position-based expectations rewritten marker-based (`paused=true/false` stat lines, 26 s run); (4) REAL defect — §3.6 latency budget FAIL: device default buffer 32 ms/1536 frames, p95 audible 62.58 ms > 25 ms (p50 50.52 ms; tap→mixed p50 18.52/p95 30.58 ms; frame p50 19.78/p95 33.78 ms) → D-37: fixed 256-frame buffer + `--buffer`, fallback to default. `cargo bench --bench audio` compiles + runs (user interrupted it early — criterion takes ~30–60 s; not stuck). Run 2 must re-verify all of it and record Q-8 (rate/channels) + Q-11 (actual buffer). |
 | **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ⬜ |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
@@ -826,8 +837,10 @@ absolute XDG paths** (§5.2) and never relative to the repo. Conventions:
   *Phase-2 status: `benches/audio.rs` exists and runs (`cargo bench`):
   clock time 6.7 ns, pause+resume cycle 8.2 ns, 512-frame stereo mix 2.9 µs
   (≈0.03 % of the 10.7 ms callback period — I-02 headroom), 10 s stereo
-  44.1→48 kHz resample 39 ms. `--latency-test` implemented (D-33). The slider
-  LUT bench lands with phase 6.*
+  44.1→48 kHz resample 39 ms. `--latency-test` implemented (D-33). Expect
+  `cargo bench --bench audio` to take ~30–60 s of MEASUREMENT after ~30 s of
+  compiling (criterion: 3 s warmup + 5 s measurement per bench) — it is not
+  stuck; the tables print at the end. The slider LUT bench lands with phase 6.*
 - **Logging**: `tracing` + `tracing-subscriber`, `RUST_LOG=hyprbeat=debug`.
   Add to crate stack in phase 1.
 
@@ -910,22 +923,47 @@ adds the new one, and updates dependent sections.
   sample format as cpal sees it, making the clock count exactly the file's
   samples (D-30's happy path)? The `audio stream started` log line prints
   the negotiated `rate=`/`channels=` — `dev/validate-phase2.sh` step 2
-  captures it. Answer by recording the printed values for the 44.1 kHz test
-  tone. If the negotiated rate is 48 kHz for a 44.1 kHz file, the fallback
-  resampler engaged (still fine — note the log line "device refused the
-  file's native rate").
+  captures it. *Run-1 status 2026-11-13: not yet answered — the rate/channels
+  extraction came back empty (field greps broke on the dev machine's log
+  format; D-38). Run 2's step 2 prints the full line either way and answers
+  this. If the negotiated rate is 48 kHz for the 44.1 kHz test tone, the
+  fallback resampler engaged (still fine — note the log line "device refused
+  the file's native rate").*
 - **Q-9 (new, 2026-11-12, phase 2)**: the `--latency-test` audible-time
   estimate is `mixed + callback period` — it cannot see the true DAC/output
   latency beyond the buffer geometry without a microphone (no hardware
   loop-back on the dev machine). If the p95 estimate passes ≤ 25 ms but a tap
   still *feels* late, record the discrepancy and consider requesting a
   smaller `BufferSize::Fixed` from cpal (tune only with data).
+  *Run-1 status 2026-11-13: p95 audible 62.58 ms — FAIL, root cause measured:
+  the device-chosen period was 32 ms (1536 frames), so even instant mixing
+  could not fit the budget. Q-9's contingency is now ENGAGED as D-37 (default
+  256-frame fixed buffer + `--buffer`); run 2 re-measures. Re-open only if
+  p95 still fails with a small period.*
 - **Q-10 (new, 2026-11-12, phase 2)**: mp3/ogg/vorbis decode paths are unit-
   tested only via WAV round-trips (the committed assets are WAV); the dev
   machine should spot-check ONE real mp3 from the user's own library through
   `--audio` during validation (decode + playback + cache hit on re-run). No
   automated fixture shipped — real `.osz`-grade audio arrives with phase 3's
   golden files.
+- **Q-11 (new, 2026-11-13, phase 2)**: does PipeWire's ALSA compat node
+  actually honor cpal's `BufferSize::Fixed(256)` (D-37), or does it clamp /
+  adjust the period? Answer from run 2: the `--latency-test` report prints
+  the ACTUAL period (observed `frames_per_callback`), and the `audio stream
+  started` line prints `buffer=fixed-256` vs `buffer=device default (fixed
+  refused)`. If the actual period stays ≈ 32 ms despite the request, record
+  it here and fall back to tuning inside what PipeWire offers (or a dated
+  §3.6 waiver per the budget rule).
+- **Q-12 (new, 2026-11-13, phase 2)**: run 1's redirected logs defeated
+  field greps (`rate=`, `song_ms=`) while message greps matched — consistent
+  with ANSI escapes painted around field names/`=` (tracing-subscriber 0.3.23
+  paints the name italic + `=` dimmed; D-38), though the same crate versions
+  print clean when redirected in the build sandbox. The new script ANSI-strips
+  every log before grepping, so this is belt-and-braces — but the ROOT cause
+  on that machine (why escapes landed in a non-tty file) is still unidentified.
+  If run 2's logs again contain escapes, inspect one directly (`cat -v` on a
+  kept log) and record the finding here; consider
+  `.with_ansi(stderr().is_terminal())` in main.rs as a hard guarantee.
 
 ---
 

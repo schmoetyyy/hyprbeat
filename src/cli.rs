@@ -49,6 +49,11 @@ OPTIONS (phase-2 dev/diagnostic set; clap + config flags land in phase 5):
         --offset-ms N       Universal audio offset (§3.3): shifts game time
                             relative to what you hear; negative = earlier
                             [default: 0]
+        --buffer N          Output buffer in frames — the latency floor of the
+                            input→sound budget (§3.6). 0 = device default
+                            (measured 32 ms on PipeWire — too big); the engine
+                            falls back to the device default if a fixed size is
+                            refused [default: 256 ≈ 5.3 ms at 48 kHz]
         --latency-test      Input → sound → photon report (§3.6, §12.3):
                             switch to an EMPTY workspace, click the desktop
                             once for keyboard focus, then TAP keys; every tap
@@ -104,6 +109,11 @@ pub struct Args {
     pub volume: f32,
     /// Universal audio offset in ms (§3.3).
     pub offset_ms: f64,
+    /// Requested output buffer size in frames (D-37). 256 ≈ 5.3 ms at 48 kHz;
+    /// 0 = device default (was 32 ms / 1536 frames on the dev machine — the
+    /// §3.6 input→sound budget busts with that). 16–8192 clamped; the engine
+    /// falls back to the device default if the host refuses a fixed size.
+    pub buffer_frames: u32,
     pub help: bool,
     pub version: bool,
 }
@@ -133,6 +143,7 @@ where
     let mut no_audio = false;
     let mut volume = crate::audio::DEFAULT_VOLUME;
     let mut offset_ms = 0.0f64;
+    let mut buffer_frames = crate::audio::DEFAULT_BUFFER_FRAMES;
     let mut help = false;
     let mut version = false;
     let mut timeout: Option<Option<Duration>> = None;
@@ -156,6 +167,9 @@ where
             }
             "--offset-ms" => {
                 offset_ms = parse_value(&mut it, "--offset-ms", parse_offset)?;
+            }
+            "--buffer" => {
+                buffer_frames = parse_value(&mut it, "--buffer", parse_buffer)?;
             }
             "--fps" => {
                 idle_fps = parse_value(&mut it, "--fps", parse_fps)?;
@@ -225,6 +239,7 @@ where
         no_audio,
         volume,
         offset_ms,
+        buffer_frames,
         help,
         version,
     })
@@ -303,6 +318,19 @@ fn parse_offset(s: &str) -> Result<f64, String> {
     Ok(v)
 }
 
+/// `--buffer N`: output buffer in frames (D-37). 0 = device default;
+/// non-zero must be 16..=8192 (below 16 the callback rate itself becomes
+/// an RT-scheduling hazard, above 8192 the latency is a fifth of a second).
+fn parse_buffer(s: &str) -> Result<u32, String> {
+    let n: u32 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a non-negative integer"))?;
+    if n != 0 && !(16..=8192).contains(&n) {
+        return Err("buffer must be 0 (device default) or between 16 and 8192 frames".to_owned());
+    }
+    Ok(n)
+}
+
 /// `--timeout SECS`: a non-negative duration in (fractional) seconds; `0`
 /// means "no timeout".
 fn parse_timeout(s: &str) -> Result<Option<Duration>, String> {
@@ -376,6 +404,20 @@ mod tests {
         assert!(args(&["--offset-ms", "10000"]).is_ok());
         assert!(args(&["--offset-ms", "10001"]).is_err());
         assert!(args(&["--offset-ms", "inf"]).is_err());
+    }
+
+    #[test]
+    fn buffer_flag_defaults_and_parses() {
+        // default: 256 (D-37)
+        let a = args(&["--audio", "x.wav"]).unwrap();
+        assert_eq!(a.buffer_frames, 256);
+        // explicit values pass through, 0 = device default
+        assert_eq!(args(&["--buffer", "128"]).unwrap().buffer_frames, 128);
+        assert_eq!(args(&["--buffer", "0"]).unwrap().buffer_frames, 0);
+        // out-of-range rejected
+        assert!(args(&["--buffer", "8"]).is_err());
+        assert!(args(&["--buffer", "99999"]).is_err());
+        assert!(args(&["--buffer", "-4"]).is_err());
     }
 
     #[test]
