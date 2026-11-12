@@ -206,7 +206,9 @@ pub fn decode_cache(bytes: &[u8]) -> Result<Decoded, String> {
 /// Cache path for a source file inside a hyprbeat cache root
 /// (`~/.cache/hyprbeat/decoded`).
 pub fn cache_path(cache_root: &Path, source_bytes: &[u8]) -> PathBuf {
-    cache_root.join(format!("{}.f32", cache_key(source_bytes)))
+    cache_root
+        .join("decoded")
+        .join(format!("{}.f32", cache_key(source_bytes)))
 }
 
 /// Read a cached decode if present and valid.
@@ -510,7 +512,8 @@ mod tests {
         let (first, hit) = decode_file_cached(&src, &dir).unwrap();
         assert!(!hit, "first call decodes");
         assert!(
-            dir.join(format!("{}.f32", cache_key(&std::fs::read(&src).unwrap())))
+            dir.join("decoded")
+                .join(format!("{}.f32", cache_key(&std::fs::read(&src).unwrap())))
                 .exists()
         );
         let (second, hit) = decode_file_cached(&src, &dir).unwrap();
