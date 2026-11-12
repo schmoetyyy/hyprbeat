@@ -285,14 +285,18 @@ fn build_stream(
     channels: u16,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let mixer = mixer.clone();
-    let shared = shared.clone();
+    // D-39: one Arc clone per callback closure. The `move` data callback
+    // consumes its capture, so the error callback below must clone the
+    // ORIGINAL `&Arc` param — cloning the binding the data callback already
+    // ate was the phase-2 compile blocker (E0382).
+    let shared_data = shared.clone();
     let channels = channels as usize;
     let data_callback = move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
         // I-02: only atomics + buffer writes live here (see mixer docs)
         let frames = (data.len() / channels) as u64;
-        let start = shared.samples.load(Ordering::Relaxed);
+        let start = shared_data.samples.load(Ordering::Relaxed);
         mixer.mix_into(data, start, frames);
-        shared.samples.fetch_add(frames, Ordering::Relaxed);
+        shared_data.samples.fetch_add(frames, Ordering::Relaxed);
     };
     let error_callback = {
         // RT context: store a flag, nothing else — the main tick degrades

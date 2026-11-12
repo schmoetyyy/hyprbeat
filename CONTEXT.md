@@ -5,8 +5,9 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-13 — **phase 2 → code complete; dev-machine
-> validation run 1 = 9 pass / 4 fail → root-caused and fixed, awaiting run 2**
+> **Last updated**: 2026-11-13 (later) — **phase 2 → code complete; run-1
+> fixes + D-39 (E0382 compile blocker) fixed; offline gates re-verified green
+> in-session; awaiting dev-machine validation run 2**
 > (2026-11-12 session built the audio engine:
 > cpal raw callback as the clock (§3.3, I-01), symphonia decode + SHA-256
 > cache, RT-safe mixer with SPSC sound queue, degraded wall-clock path
@@ -20,6 +21,16 @@
 > `cargo fmt --check` re-run green. Full clippy/test re-run happens on the dev
 > machine as validate-phase2.sh step 0b (this sandbox was recycled and lost
 > root/alsa headers for a native rebuild).
+> 2026-11-13 D-39 note — that no-rebuild shortcut bit back: the re-delivered
+> tree did NOT compile. The run-1 fix wave had wired the cpal callbacks in
+> `build_stream` so the `move` data closure consumed the one `Arc` clone,
+> leaving the error callback to clone a moved binding (E0382) — build, bench
+> and validate step 0 were all dead on the dev machine. Fixed (one clone per
+> closure) and this time genuinely verified: the sandbox regained a rustup
+> toolchain and stub pkg-config files stood in for the missing alsa/xkbcommon
+> system headers, so `cargo check --all-targets`, `cargo fmt --check`,
+> `cargo clippy --all-targets -- -D warnings` and `cargo test --lib`
+> (84 passed) all ran green before re-sending.
 > Run-1 outcome (9 pass / 4 fail): build + all offline gates + headless PNG +
 > music sync (user y) + degraded amber band (user y) + pause/resume logged ✓;
 > 4 fails → two script bugs (tracing prints string fields QUOTED so `cache=miss`
@@ -30,10 +41,11 @@
 > engine now requests a 256-frame fixed buffer with fallback (D-37, `--buffer`).
 > All offline gates pass in a build sandbox: 82 unit tests, fmt, clippy
 > -D warnings; benches: clock 6.7 ns, 512-frame mix 2.9 µs, 10 s resample 39 ms.)
-> **Current phase**: 2 — **IN PROGRESS (code complete; validation run 2
-> pending on the dev machine)**. Next: re-run `dev/validate-phase2.sh` after
-> applying the 2026-11-13 fix drop, record results, then phase 3 (beatmap
-> parsing, §10 row 3).
+> **Current phase**: 2 — **IN PROGRESS (code complete + D-39; validation
+> run 2 pending on the dev machine)**. Next: apply the updated 2026-11-13 fix
+> drop (D-39 included — replace `src/audio/mod.rs` or apply the patch), re-run
+> `dev/validate-phase2.sh`, record results, then phase 3 (beatmap parsing,
+> §10 row 3).
 
 ---
 
@@ -703,6 +715,7 @@ scoring math (§11 I-09), never in the live game.
 | D-36 | Criterion added as a dev-dependency ONLY (`default-features = false` + `cargo_bench_support`) with `benches/audio.rs` under `harness = false`; the release dependency tree is untouched (§4). A `src/lib.rs` facade exists so benches can import the modules (binary stays thin) | §12.3 mandates criterion benches for the clock math from phase 2 on; dev-dep-only keeps the shipped tree small |
 | D-37 | **Output buffer: request `BufferSize::Fixed(256)` by default** (≈5.3 ms @48 kHz), `--buffer N` CLI (16–8192, 0 = device default); if the host refuses a fixed size, fall back to the device default with a warn log — never fatal (D-16 posture). Rationale is measured, not vibes: validation run 1 on the dev machine negotiated a 32 ms / 1536-frame device default period, so the §3.6 input→sound budget (p95 audible ≤ 25 ms) was arithmetically unreachable (measured p95 62.58 ms = mixed 30.58 + period 32); this is Q-9's documented contingency engaged with data. The actual negotiated geometry is still observed at runtime (`frames_per_callback`) and printed by `--latency-test`, so run 2 verifies what PipeWire really gave us (Q-11) | The callback-rate cost is bounded by the mix bench (512-frame mix = 2.9 µs → 256-frame callbacks at ~187 Hz cost ≪ 1 % core); the budget is the point of the project (D-01) |
 | D-38 | **Log-format contract for validation greps** (learned in run 1): tracing-subscriber's default formatter prints non-message string fields Debug-QUOTED (`cache="miss"`) while numbers print bare; and on the dev machine's redirected logs even numeric field greps (`rate=`, `song_ms=`) matched nothing — consistent with ANSI escapes around field names/`=` (verified against tracing-subscriber 0.3.23 source: field name painted italic, `=` painted dimmed). Fixes, in force from now on: (a) log greps in dev scripts must be ANSI-stripped (`sed $'s/\x1b\[[0-9;]*[mK]//g'`) and quote-tolerant (`cache="?miss"?`); (b) string fields we grep for use the `%` Display sigil to print bare (`cache=%(...)` — music decoded line now does); (c) dev scripts print the FULL matched line on extraction failure so misses self-diagnose; (d) phase scripts keep their log dir when anything fails (path printed) | A grep that silently matches nothing turns a passing system into a FAIL with no evidence; run 1 burned a dev-machine round trip on exactly that |
+| D-39 | **`build_stream` ownership: one `Arc` clone per cpal callback closure** (fix for the E0382 that shipped in the 2026-11-13 fix drop). What happened: that drop was edited in a recycled sandbox that could no longer compile (no alsa/xkb headers), so the callback wiring never got borrow-checked — `let shared = shared.clone();` shadowed the `&Arc` param, the `move` data callback consumed the binding, and the error callback's own `let shared = shared.clone();` then borrowed a moved value. Fix in `src/audio/mod.rs`: the data callback captures its own `shared_data` clone; the error callback clones the ORIGINAL param (both callbacks must own an `Arc` — cpal requires `Send + 'static` closures). Process lesson, in force: **a re-delivery that cannot run at least `cargo check --all-targets` in its own sandbox is not verified** — byte-diff, fmt and grep anchors caught nothing here; this time check + fmt + clippy `-D warnings` + `test --lib` (84 passed) all ran green before sending | E0382-class ownership bugs are invisible to byte-comparisons; "awaiting run 2" was actually "run 2 cannot start". One compile gate in the producing sandbox keeps dev-machine round trips single-purpose |
 
 ---
 
@@ -712,7 +725,7 @@ scoring math (§11 I-09), never in the live game.
 |---|---|---|---|
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
-| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | 🔶 **IN PROGRESS — code complete; dev-machine validation run 1 done 2026-11-13: 9 pass / 4 fail → fixed, run 2 pending.** Run 1: build+fmt+clippy+82 tests, headless PNG, music sync (user y), degraded amber band (user y), SIGUSR1/2 pause+resume logged — all PASS. 4 FAILs root-caused: (1–2) cache miss/hit greps — script bug, tracing prints string fields quoted (D-38; fixed: quote-tolerant + ANSI-strip + cache=% bare + deterministic cache wipe per run); (3) pause/rebase freeze math unreadable — same field-grep bug + position-based expectations rewritten marker-based (`paused=true/false` stat lines, 26 s run); (4) REAL defect — §3.6 latency budget FAIL: device default buffer 32 ms/1536 frames, p95 audible 62.58 ms > 25 ms (p50 50.52 ms; tap→mixed p50 18.52/p95 30.58 ms; frame p50 19.78/p95 33.78 ms) → D-37: fixed 256-frame buffer + `--buffer`, fallback to default. `cargo bench --bench audio` compiles + runs (user interrupted it early — criterion takes ~30–60 s; not stuck). Run 2 must re-verify all of it and record Q-8 (rate/channels) + Q-11 (actual buffer). |
+| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | 🔶 **IN PROGRESS — code complete; dev-machine validation run 1 done 2026-11-13: 9 pass / 4 fail → fixed, run 2 pending.** Run 1: build+fmt+clippy+82 tests, headless PNG, music sync (user y), degraded amber band (user y), SIGUSR1/2 pause+resume logged — all PASS. 4 FAILs root-caused: (1–2) cache miss/hit greps — script bug, tracing prints string fields quoted (D-38; fixed: quote-tolerant + ANSI-strip + cache=% bare + deterministic cache wipe per run); (3) pause/rebase freeze math unreadable — same field-grep bug + position-based expectations rewritten marker-based (`paused=true/false` stat lines, 26 s run); (4) REAL defect — §3.6 latency budget FAIL: device default buffer 32 ms/1536 frames, p95 audible 62.58 ms > 25 ms (p50 50.52 ms; tap→mixed p50 18.52/p95 30.58 ms; frame p50 19.78/p95 33.78 ms) → D-37: fixed 256-frame buffer + `--buffer`, fallback to default. `cargo bench --bench audio` compiles + runs (user interrupted it early — criterion takes ~30–60 s; not stuck). Run 2 must re-verify all of it and record Q-8 (rate/channels) + Q-11 (actual buffer). 2026-11-13 later: the fix drop was initially DOA — E0382 in `build_stream` (D-39) killed build/bench/step 0; fixed same day + offline gates green in the producing sandbox (84 tests); run 2 can actually start now. |
 | **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ⬜ |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
