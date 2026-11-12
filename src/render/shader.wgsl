@@ -1,12 +1,14 @@
-// hyprbeat phase-1 shader: ambient four-corner gradient + optional scale test
-// card. One uniform block, one fullscreen triangle, one draw call (§3.5).
+// hyprbeat phase-2 shader: ambient four-corner gradient + optional scale test
+// card + music-synced pulse + latency flash + degraded-timing band. One
+// uniform block, one fullscreen triangle, one draw call (§3.5).
 //
 // The uniform layout MUST match `render::Uniforms` (see render/mod.rs):
 //   0   res_buf  vec2  buffer size in px
 //   8   res_log  vec2  logical size in px
-//   16  time_ms  f32   decorative animation time (I-01: NOT gameplay time)
-//   20  testcard u32   0/1
-//   24  pad0     vec2  alignment padding
+//   16  time_ms  f32   song/anim time (audio clock when a song is loaded)
+//   20  flags    u32   bit0 = testcard, bit1 = timing degraded (I-12 stand-in)
+//   24  level    f32   audio envelope 0..1 (mixer RMS — the visible beat)
+//   28  flash    f32   latency-test flash 0..1
 //   32  c00      vec4  top-left corner color
 //   48  c10      vec4  top-right
 //   64  c01      vec4  bottom-left
@@ -17,8 +19,9 @@ struct U {
     res_buf: vec2<f32>,
     res_log: vec2<f32>,
     time_ms: f32,
-    testcard: u32,
-    pad0: vec2<f32>,
+    flags: u32,
+    level: f32,
+    flash: f32,
     c00: vec4<f32>,
     c10: vec4<f32>,
     c01: vec4<f32>,
@@ -62,7 +65,28 @@ fn fs(v: VOut) -> @location(0) vec4<f32> {
     // ambient gradient: bilinear blend of the four corners
     var col = mix(mix(u.c00, u.c10, t.x), mix(u.c01, u.c11, t.x), t.y);
 
-    if u.testcard == 1u {
+    // music-synced pulse (phase 2 exit criterion): the corner colors are a
+    // pure function of the audio clock time; the envelope lifts the whole
+    // frame toward the accent with the loudness actually leaving the DAC.
+    // Paused ⇒ silence ⇒ envelope 0 ⇒ the wallpaper visibly freezes with
+    // the song.
+    col = mix(col, u.accent, clamp(u.level, 0.0, 1.0) * 0.35);
+
+    // latency-test flash: a brief bright overlay per tap
+    col = mix(col, vec4<f32>(1.0, 1.0, 1.0, 1.0), clamp(u.flash, 0.0, 1.0) * 0.6);
+
+    // degraded timing (I-12): pulsing amber band along the top edge — the
+    // phase-2 stand-in for the HUD warning string (cosmic-text is phase 8).
+    // Silent degradation is a bug, so the marker is unmissable.
+    if (u.flags & 2u) != 0u {
+        let pulse = 0.30 + 0.20 * sin(u.time_ms * 0.0062832); // ≈1 Hz
+        let band_h = u.res_log.y * 0.035;
+        if px.y < band_h {
+            col = mix(col, vec4<f32>(1.0, 0.62, 0.12, 1.0), pulse);
+        }
+    }
+
+    if (u.flags & 1u) != 0u {
         // 2-logical-px accent border: geometry must be exact at any scale
         let b = 2.0;
         let inside = px.x >= b && px.y >= b

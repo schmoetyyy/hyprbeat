@@ -17,6 +17,11 @@ pub const SHADER: &str = include_str!("shader.wgsl");
 /// Size of the uniform block; must match `struct U` in `shader.wgsl`.
 pub const UNIFORM_SIZE: usize = 112;
 
+/// Bit layout of the `flags` uniform word (phase 2: the old `testcard` bool
+/// grew into a bitfield without changing the block size).
+pub const FLAG_TESTCARD: u32 = 1 << 0;
+pub const FLAG_DEGRADED: u32 = 1 << 1;
+
 /// An owned Wayland display handle that is `Send + Sync`.
 ///
 /// raw-window-handle deliberately does not mark raw handles as thread-safe;
@@ -114,8 +119,12 @@ struct Uniforms {
     res_buf: [f32; 2],
     res_log: [f32; 2],
     time_ms: f32,
-    testcard: u32,
-    pad0: [u32; 2],
+    flags: u32,
+    /// Audio envelope 0..1 (mixer RMS of the last callback) — the visible
+    /// "wallpaper synced to music" channel of phase 2.
+    level: f32,
+    /// Latency-test flash 0..1 (brief bright overlay per tap).
+    flash: f32,
     c00: [f32; 4],
     c10: [f32; 4],
     c01: [f32; 4],
@@ -135,12 +144,12 @@ impl Uniforms {
             (8, self.res_log[0]),
             (12, self.res_log[1]),
             (16, self.time_ms),
+            (24, self.level),
+            (28, self.flash),
         ] {
             put(&mut b, off, v.to_ne_bytes());
         }
-        put(&mut b, 20, self.testcard.to_ne_bytes());
-        put(&mut b, 24, self.pad0[0].to_ne_bytes());
-        put(&mut b, 28, self.pad0[1].to_ne_bytes());
+        put(&mut b, 20, self.flags.to_ne_bytes());
         for (i, c) in [self.c00, self.c10, self.c01, self.c11, self.accent]
             .into_iter()
             .enumerate()
@@ -160,9 +169,17 @@ pub struct FrameParams {
     pub logical: (f32, f32),
     /// Backing buffer size (`round(logical × scale)`, D-21).
     pub buffer: (f32, f32),
-    /// Decorative animation time in ms (I-01: not gameplay time).
+    /// Animation time in ms — with a song loaded this IS the audio clock's
+    /// song time (I-01); decorative wall time otherwise.
     pub time_ms: f32,
     pub testcard: bool,
+    /// Audio envelope 0..1 (music-synced pulse; 0 without audio).
+    pub level: f32,
+    /// Latency-test flash 0..1.
+    pub flash: f32,
+    /// Timing degraded — wall clock in use (I-12: must be visible; phase-2
+    /// stand-in is the shader's amber band until HUD text lands in phase 8).
+    pub degraded: bool,
     /// Corner colors `[tl, tr, bl, br]`, already converted for the target
     /// format (sRGB floats for `*UnormSrgb`, linear otherwise).
     pub corners: [[f32; 4]; 4],
@@ -171,12 +188,20 @@ pub struct FrameParams {
 
 impl FrameParams {
     fn pack(&self) -> Uniforms {
+        let mut flags = 0u32;
+        if self.testcard {
+            flags |= FLAG_TESTCARD;
+        }
+        if self.degraded {
+            flags |= FLAG_DEGRADED;
+        }
         Uniforms {
             res_buf: [self.buffer.0, self.buffer.1],
             res_log: [self.logical.0, self.logical.1],
             time_ms: self.time_ms,
-            testcard: u32::from(self.testcard),
-            pad0: [0, 0],
+            flags,
+            level: self.level,
+            flash: self.flash,
             c00: self.corners[0],
             c10: self.corners[1],
             c01: self.corners[2],
@@ -367,8 +392,9 @@ mod tests {
             res_buf: [1.0, 2.0],
             res_log: [3.0, 4.0],
             time_ms: 5.0,
-            testcard: 1,
-            pad0: [0, 0],
+            flags: FLAG_TESTCARD | FLAG_DEGRADED,
+            level: 6.0,
+            flash: 7.0,
             c00: [10.0, 11.0, 12.0, 13.0],
             c10: [20.0, 21.0, 22.0, 23.0],
             c01: [30.0, 31.0, 32.0, 33.0],
@@ -380,7 +406,12 @@ mod tests {
         assert_eq!(f32_at(0), 1.0);
         assert_eq!(f32_at(12), 4.0);
         assert_eq!(f32_at(16), 5.0);
-        assert_eq!(u32::from_ne_bytes(b[20..24].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_ne_bytes(b[20..24].try_into().unwrap()),
+            FLAG_TESTCARD | FLAG_DEGRADED
+        );
+        assert_eq!(f32_at(24), 6.0, "level");
+        assert_eq!(f32_at(28), 7.0, "flash");
         assert_eq!(f32_at(32), 10.0, "c00");
         assert_eq!(f32_at(48), 20.0, "c10");
         assert_eq!(f32_at(64), 30.0, "c01");
@@ -390,20 +421,28 @@ mod tests {
     }
 
     #[test]
-    fn frame_params_pack_testcard_flag() {
+    fn frame_params_pack_flag_bits() {
         let p = FrameParams {
             logical: (1920.0, 1080.0),
             buffer: (2400.0, 1350.0),
             time_ms: 1234.0,
             testcard: true,
+            level: 0.0,
+            flash: 0.0,
+            degraded: false,
             corners: [[0.0; 4]; 4],
             accent: [1.0; 4],
         };
-        assert_eq!(p.pack().testcard, 1);
+        assert_eq!(p.pack().flags, FLAG_TESTCARD);
         let p = FrameParams {
             testcard: false,
+            degraded: true,
+            level: 0.5,
+            flash: 0.75,
             ..p
         };
-        assert_eq!(p.pack().testcard, 0);
+        assert_eq!(p.pack().flags, FLAG_DEGRADED);
+        assert_eq!(p.pack().level, 0.5);
+        assert_eq!(p.pack().flash, 0.75);
     }
 }

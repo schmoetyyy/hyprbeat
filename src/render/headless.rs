@@ -47,6 +47,12 @@ pub fn render_png(args: &Args) -> Result<PathBuf, Error> {
         buffer: (bw as f32, bh as f32),
         time_ms: HEADLESS_TIME_MS as f32,
         testcard: args.testcard,
+        // Headless renders a still frame: no audio stream is opened (D-16 —
+        // this IS the explicit wall-clock path), so the music-synced pulse
+        // and flash channels stay at rest.
+        level: 0.0,
+        flash: 0.0,
+        degraded: false,
         corners: render::corners_for_frame(HEADLESS_TIME_MS, true),
         accent: render::accent_for_frame(true),
     };

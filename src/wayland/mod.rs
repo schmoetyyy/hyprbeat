@@ -1,18 +1,25 @@
 //! Wayland client core (§3.1, §8): connection, registry, one background
 //! layer-shell surface per output, and the calloop main loop (D-02/D-11).
 //!
-//! Phase-1 render policy (§3.5): render inside frame callbacks, throttle
+//! Phase-2 render policy (§3.5): render inside frame callbacks, throttle
 //! to `--fps` (default 30) by skipping, and re-arm callbacks with a watchdog
 //! so a fully occluded surface costs ~0 CPU (the "free pause"). The FIRST
 //! frame after a configure is presented EAGERLY (D-26): a layer surface that
 //! has never attached a buffer is never composited, so no callback would
 //! ever arrive to draw it — waiting is a chicken-and-egg deadlock.
+//!
+//! Phase 2 (§10 row 2): the wallpaper animation is driven by the audio clock
+//! (I-01) whenever a session exists — [`TimingState`] tracks which time
+//! base is live, including the D-16 degraded wall clock and its I-12 amber
+//! band. SIGUSR1/SIGUSR2 pause/resume the song (D-33 dev hook).
 
+pub mod latency;
 pub mod probe;
 pub mod surface;
 
 use std::time::{Duration, Instant};
 
+use calloop::signals::{Signal, Signals};
 use calloop::timer::TimeoutAction;
 use calloop_wayland_source::WaylandSource;
 use raw_window_handle::{
@@ -53,6 +60,7 @@ use wayland_protocols::wp::viewporter::client::{
 };
 
 use crate::Error;
+use crate::audio::{self, mixer::SoundEvent};
 use crate::cli::Args;
 use crate::render::{self, FrameParams, Gpu, scale};
 use probe::ProbeReport;
@@ -69,6 +77,27 @@ const CALLBACK_WATCHDOG: Duration = Duration::from_millis(250);
 /// Occlusion (fullscreen window on top) legitimately stops callbacks; the
 /// first overdue re-arm logs a warning, later ones stay quiet.
 const STATS_INTERVAL: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------------
+// Timing (phase 2: I-01 + D-16)
+// ---------------------------------------------------------------------------
+
+/// What the wallpaper's animation time comes from.
+///
+/// * `Audio` — the ONLY valid gameplay time base: the cpal sample counter
+///   (§3.3, I-01). After a runtime stream failure the clock inside the
+///   engine flips itself to its degraded wall mode and [`App::timing_degraded`]
+///   turns on the amber band (I-12).
+/// * `DegradedWall` — audio was wanted but could not start (`--audio` failed
+///   to open, or the forced `--no-audio` validation path).
+/// * `PlainWall` — no audio wanted at all: the phase-1 decorative gradient
+///   (NOT degraded — nothing to degrade; the demo autoplay of later phases
+///   will always carry a song).
+enum TimingState {
+    Audio(audio::AudioEngine),
+    DegradedWall(audio::clock::Clock),
+    PlainWall,
+}
 
 // ---------------------------------------------------------------------------
 // App state
@@ -114,25 +143,53 @@ pub struct App {
     fatal: Option<String>,
     stats: FrameStats,
     probe_report: ProbeReport,
+    /// Phase 2: the animation/gameplay time base (I-01, D-16).
+    timing: TimingState,
+    /// `--latency-test` recorded taps (see `latency.rs`).
+    latency_taps: Vec<latency::Tap>,
+    /// Deadline of the current latency-test visual flash.
+    flash_deadline: Option<Instant>,
+    /// Song-finished notice logged exactly once.
+    song_finished_logged: bool,
 
-    // probe-mode input objects (freed on capability loss / exit)
+    // probe/latency-test-mode input objects (freed on capability loss / exit)
     probe_keyboard: Option<wl_keyboard::WlKeyboard>,
     probe_pointer: Option<wl_pointer::WlPointer>,
     probe_relative: Option<ZwpRelativePointerV1>,
 }
 
 impl App {
-    /// Ambient animation time in ms.
-    ///
-    /// Decorative only — gameplay time will come exclusively from the audio
-    /// clock once phase 2 lands it (§3.3, I-01). Keeping the accessor
-    /// centralized makes that swap mechanical.
-    fn now_ms(&self) -> f64 {
-        self.started.elapsed().as_secs_f64() * 1000.0
+    /// Wallpaper animation time in ms — the audio clock when a session
+    /// exists (I-01: gameplay time NEVER comes from a wall clock while one is
+    /// live), the degraded wall clock when it failed, decorative wall time
+    /// only in the no-audio case. Centralized so the phase-4+ game loop
+    /// consumes exactly the same source.
+    fn anim_ms(&self) -> f64 {
+        match &self.timing {
+            TimingState::Audio(engine) => engine.clock.time_ms(),
+            TimingState::DegradedWall(clock) => clock.time_ms(),
+            TimingState::PlainWall => self.started.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
+    /// I-12: is timing running on the degraded wall clock? (Never silent —
+    /// the renderer shows the amber band.)
+    fn timing_degraded(&self) -> bool {
+        match &self.timing {
+            TimingState::Audio(engine) => engine.clock.is_degraded(),
+            TimingState::DegradedWall(_) => true,
+            TimingState::PlainWall => false,
+        }
     }
 
     fn quit(&mut self) {
         self.signal.stop();
+    }
+
+    /// Do the phase-2 diagnostic modes want full input (probe §14, or the
+    /// `--latency-test` tap channel — D-28 lesson: run on an EMPTY workspace)?
+    fn input_mode(&self) -> bool {
+        self.args.probe || self.args.latency_test
     }
 
     fn index_of_surface(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
@@ -184,7 +241,7 @@ impl App {
         );
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_exclusive_zone(-1);
-        layer.set_keyboard_interactivity(if self.args.probe {
+        layer.set_keyboard_interactivity(if self.input_mode() {
             KeyboardInteractivity::OnDemand
         } else {
             KeyboardInteractivity::None
@@ -194,9 +251,9 @@ impl App {
         layer.set_size(0, 0);
 
         // I-13: pointer passthrough — an empty input region means desktop
-        // clicks never reach the wallpaper. In probe mode we deliberately
-        // keep full input so Q-1/Q-2 can be observed.
-        let input_region = if self.args.probe {
+        // clicks never reach the wallpaper. In probe/latency mode we
+        // deliberately keep full input so Q-1/Q-2 and the taps can be observed.
+        let input_region = if self.input_mode() {
             None
         } else {
             let region = self
@@ -403,7 +460,12 @@ impl App {
     }
 
     fn render_output(&mut self, idx: usize) -> bool {
-        let now_ms = self.now_ms();
+        // Phase 2: the frame time IS the audio clock when a song is loaded
+        // (I-01) — pause/resume of the audio therefore freezes/resumes the
+        // animation with sample accuracy. The music envelope (RMS leaving
+        // the DAC) modulates the gradient — the visible "wallpaper synced to
+        // music" exit criterion.
+        let (anim_ms, level, flash, degraded) = self.frame_time_inputs();
         let (logical, buffer, srgb, testcard) = {
             let s = &self.outputs[idx];
             (
@@ -414,16 +476,19 @@ impl App {
             )
         };
         // The shader consumes time as f32; a raw 24/7 millisecond counter
-        // would visibly step after ~4.6 h (2^24 ms). All phase-1 animations
+        // would visibly step after ~4.6 h (2^24 ms). All phase-1/2 animations
         // have periods dividing 8000 ms, so wrap first — the wallpaper is
         // meant to run for days.
-        let anim_ms = now_ms.rem_euclid(crate::config::theme::GRADIENT_PERIOD_MS);
+        let anim_ms = anim_ms.rem_euclid(crate::config::theme::GRADIENT_PERIOD_MS);
         let frame = FrameParams {
             logical: (logical.0 as f32, logical.1 as f32),
             buffer: (buffer.0 as f32, buffer.1 as f32),
             time_ms: anim_ms as f32,
             testcard,
-            corners: render::corners_for_frame(now_ms, srgb),
+            level,
+            flash,
+            degraded,
+            corners: render::corners_for_frame(anim_ms, srgb),
             accent: render::accent_for_frame(srgb),
         };
 
@@ -471,7 +536,46 @@ impl App {
         // commits the surface (so viewport/frame-callback state committed
         // earlier rides along).
         self.gpu.queue.present(texture);
+        // `--latency-test`: stamp the first frame submitted after the tap
+        // (the flash rides on this very frame — photon leg of the report).
+        if self.args.latency_test && self.flash_deadline.is_some() {
+            if let (Some(tap), TimingState::Audio(engine)) =
+                (self.latency_taps.last_mut(), &self.timing)
+            {
+                if tap.frame_ns.is_none() {
+                    tap.frame_ns = Some(
+                        engine
+                            .mixer
+                            .origin
+                            .elapsed()
+                            .as_nanos()
+                            .min(u64::MAX as u128) as u64,
+                    );
+                }
+            }
+        }
         true
+    }
+
+    /// Per-frame timing inputs: `(anim_ms, envelope, flash, degraded)`.
+    fn frame_time_inputs(&self) -> (f64, f32, f32, bool) {
+        let anim_ms = self.anim_ms();
+        let level = match &self.timing {
+            TimingState::Audio(engine) => engine.mixer.envelope(),
+            _ => 0.0,
+        };
+        let flash = self
+            .flash_deadline
+            .map(|until| {
+                (until
+                    .saturating_duration_since(Instant::now())
+                    .as_secs_f64()
+                    * 1000.0
+                    / latency::FLASH_MS)
+                    .clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0) as f32;
+        (anim_ms, level, flash, self.timing_degraded())
     }
 
     // -- periodic maintenance ------------------------------------------------
@@ -488,6 +592,19 @@ impl App {
                 );
                 self.quit();
                 return;
+            }
+        }
+
+        // phase 2: runtime audio loss → degrade the clock, keep the
+        // wallpaper alive (D-16/I-08). The RT error callback only stored a
+        // flag; THIS is the safe context that acts on it.
+        if let TimingState::Audio(engine) = &mut self.timing {
+            if engine.stream_failed() && !engine.clock.is_degraded() {
+                tracing::error!(
+                    "audio stream failed at runtime — degrading to the wall clock \
+                     (timing now unranked; the amber degraded band turns on, I-12)"
+                );
+                engine.clock.degrade_to_wall();
             }
         }
 
@@ -552,6 +669,30 @@ impl App {
                 outputs = self.outputs.len(),
                 "frame loop"
             );
+            // phase 2: the audio line the validation script greps — song time
+            // from the clock (I-01), envelope, pause state, RT diagnostics.
+            if let TimingState::Audio(engine) = &self.timing {
+                let (events_dropped, voices_dropped, clipped) = engine.mixer.diagnostics();
+                tracing::info!(
+                    song_ms = engine.clock.time_ms() as i64,
+                    envelope = engine.mixer.envelope(),
+                    paused = engine.clock.is_paused(),
+                    degraded = engine.clock.is_degraded(),
+                    rate = engine.clock.rate(),
+                    frames_per_callback = engine.mixer.frames_per_callback(),
+                    events_dropped,
+                    voices_dropped,
+                    clipped,
+                    "audio clock"
+                );
+                if engine.mixer.finished() && !self.song_finished_logged {
+                    self.song_finished_logged = true;
+                    tracing::info!(
+                        song_ms = engine.clock.time_ms() as i64,
+                        "music finished (silence from here; auto-advance arrives in phase 7)"
+                    );
+                }
+            }
             self.stats.rendered = 0;
             self.stats.skipped = 0;
             self.stats.watchdog_rearms = 0;
@@ -559,7 +700,86 @@ impl App {
         }
     }
 
-    // -- scale handling --------------------------------------------------------
+    // -- phase 2: audio pause/rebase (§3.3) --------------------------------
+
+    /// SIGUSR1 (D-33): freeze the song. Audio mode stops the mapping (the
+    /// device counter keeps flowing — §3.3: "audio device time never
+    /// rewinds; the mapping does").
+    fn on_pause_signal(&mut self) {
+        match &mut self.timing {
+            TimingState::Audio(engine) => {
+                let song_ms = engine.clock.time_ms();
+                engine.clock.pause();
+                tracing::warn!(
+                    song_ms,
+                    "SIGUSR1: paused — clock frozen, mixer silenced, device counter still flowing"
+                );
+            }
+            TimingState::DegradedWall(clock) => {
+                clock.pause();
+                tracing::warn!("SIGUSR1: paused (degraded wall clock)");
+            }
+            TimingState::PlainWall => {
+                tracing::warn!("SIGUSR1: nothing to pause (no audio session in this run)");
+            }
+        }
+    }
+
+    /// SIGUSR2 (D-33): resume — rebase `song_start` to the current counter so
+    /// song time continues exactly at the pause point (§3.3).
+    fn on_resume_signal(&mut self) {
+        match &mut self.timing {
+            TimingState::Audio(engine) => {
+                let before = engine.clock.time_ms();
+                engine.clock.resume();
+                tracing::warn!(
+                    song_ms = engine.clock.time_ms() as i64,
+                    delta_ms = engine.clock.time_ms() - before,
+                    "SIGUSR2: resumed — song_start rebased onto the current counter"
+                );
+            }
+            TimingState::DegradedWall(clock) => {
+                clock.resume();
+                tracing::warn!("SIGUSR2: resumed (degraded wall clock)");
+            }
+            TimingState::PlainWall => {
+                tracing::warn!("SIGUSR2: nothing to resume (no audio session in this run)");
+            }
+        }
+    }
+
+    // -- phase 2: latency taps ----------------------------------------------
+
+    /// `--latency-test` key tap: fire a hitsound at the audio counter + a
+    /// visual flash, and record the enqueue stamp (§3.6 instrument).
+    fn on_latency_tap(&mut self) {
+        let TimingState::Audio(engine) = &self.timing else {
+            tracing::warn!(
+                "latency tap ignored — no live audio stream (degraded or plain mode); \
+                 the report will note the missing sound leg"
+            );
+            return;
+        };
+        let tag = latency::next_tag(self.latency_taps.len());
+        let enqueue_ns = engine.mixer.origin.elapsed().as_nanos() as u64;
+        let due = engine.clock.counter();
+        let queued = engine.mixer.fire(SoundEvent {
+            due,
+            sound: 0,
+            gain: 256, // 1.0
+            tag,
+        });
+        self.latency_taps
+            .push(latency::Tap::new(due, tag, enqueue_ns));
+        self.flash_deadline =
+            Some(Instant::now() + Duration::from_millis(latency::FLASH_MS as u64));
+        tracing::info!(
+            n = self.latency_taps.len(),
+            queued,
+            due,
+            "latency tap: hitsound scheduled + flash armed"
+        );
+    }
 
     fn on_preferred_scale(&mut self, surface: &wl_surface::WlSurface, units: u32) {
         let factor = scale::clamp_scale(scale::factor_from_fractional_units(units));
@@ -768,8 +988,9 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        // Input handling is phase 4; the probe is the only phase-1 consumer.
-        if !self.args.probe {
+        // Input handling is phase 4; the probe and the `--latency-test`
+        // taps are the phase-1/2 consumers.
+        if !self.input_mode() {
             return;
         }
         match capability {
@@ -889,6 +1110,9 @@ impl KeyboardHandler for App {
             }
             self.probe_report.key_events += 1;
             tracing::debug!(keysym = ?event.keysym, "probe: key press");
+        }
+        if self.args.latency_test {
+            self.on_latency_tap();
         }
     }
 
@@ -1100,6 +1324,43 @@ pub fn run(args: Args) -> Result<(), Error> {
 
     let mut event_loop = calloop::EventLoop::<App>::try_new()?;
     let started = Instant::now();
+
+    // D-33 dev hook: SIGUSR1 = pause, SIGUSR2 = resume (§3.3 rebase). The
+    // real pause paths arrive with focus-loss/mode switching in phase 7;
+    // until then signals give `dev/validate-phase2.sh` a scriptable channel.
+    //
+    // ORDER IS LOAD-BEARING: calloop's signal source BLOCKS these signals on
+    // this thread via signalfd, and threads spawned afterwards inherit the
+    // mask. The cpal callback thread (spawned by `build_timing` below) must
+    // already block SIGUSR1/2 — otherwise a `kill -USR1` could land on the
+    // unmasked audio thread and take the default terminate action, killing
+    // the wallpaper. Registration failure is non-fatal — only the validation
+    // convenience is lost (I-08 posture).
+    match Signals::new(&[Signal::SIGUSR1, Signal::SIGUSR2]) {
+        Ok(signals) => {
+            let _signal_token = event_loop
+                .handle()
+                .insert_source(signals, |info, _metadata, app: &mut App| {
+                    match info.signal() {
+                        Signal::SIGUSR1 => app.on_pause_signal(),
+                        Signal::SIGUSR2 => app.on_resume_signal(),
+                        _ => {}
+                    }
+                })
+                .map_err(|e| format!("cannot register signal handlers: {e}"));
+        }
+        Err(err) => {
+            tracing::warn!(%err, "cannot install SIGUSR1/2 handlers — pause validation needs them");
+        }
+    }
+
+    // -- phase 2: the audio session / time base (I-01, D-16) ------------------
+    // Started after the signal mask (see the comment above) and before the
+    // loop so the first frame already draws on audio clock time. Failures
+    // degrade, never abort (a wallpaper must not die with PipeWire).
+    let timing = build_timing(&args);
+    let timing_ok = matches!(timing, TimingState::Audio(ref e) if !e.clock.is_degraded());
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         compositor_state,
@@ -1120,6 +1381,10 @@ pub fn run(args: Args) -> Result<(), Error> {
         fatal: None,
         stats: FrameStats::default(),
         probe_report: ProbeReport::default(),
+        timing,
+        latency_taps: Vec::new(),
+        flash_deadline: None,
+        song_finished_logged: false,
         probe_keyboard: None,
         probe_pointer: None,
         probe_relative: None,
@@ -1128,6 +1393,9 @@ pub fn run(args: Args) -> Result<(), Error> {
     if app.args.probe {
         probe::print_instructions(&app.args);
     }
+    if app.args.latency_test {
+        latency::print_instructions(app.args.timeout.map(|d| d.as_secs_f64()));
+    }
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         outputs_pending = true,
@@ -1135,7 +1403,9 @@ pub fn run(args: Args) -> Result<(), Error> {
         idle_fps = app.args.idle_fps,
         timeout_s = app.args.timeout.map(|d| d.as_secs_f64()),
         probe = app.args.probe,
-        "hyprbeat starting (phase 1: ambient wallpaper)"
+        audio_timing = timing_ok,
+        latency_test = app.args.latency_test,
+        "hyprbeat starting (phase 2: audio clock + music-synced wallpaper)"
     );
 
     // First roundtrip: output geometry events arrive, OutputHandler fires,
@@ -1149,7 +1419,8 @@ pub fn run(args: Args) -> Result<(), Error> {
         .insert(event_loop.handle())
         .map_err(|e| format!("cannot integrate Wayland into the event loop: {e}"))?;
 
-    // 250 ms maintenance tick: safety timeout, callback watchdog, stats.
+    // 250 ms maintenance tick: safety timeout, callback watchdog, stats,
+    // audio-failure degrade check.
     let timer = calloop::timer::Timer::from_duration(TICK);
     let _timer_token = event_loop
         .handle()
@@ -1172,8 +1443,58 @@ pub fn run(args: Args) -> Result<(), Error> {
     if app.args.probe {
         app.probe_report.print_summary();
     }
+    // `--latency-test` exit report (§3.6 budget check).
+    if app.args.latency_test {
+        match &app.timing {
+            TimingState::Audio(engine) => {
+                let period_ms = engine.mixer.frames_per_callback() as f64
+                    / engine.clock.rate().max(1) as f64
+                    * 1000.0;
+                latency::LatencyStats::summarize_with_period(
+                    &app.latency_taps,
+                    &engine.mixer,
+                    period_ms,
+                )
+                .print(period_ms);
+            }
+            _ => {
+                println!(
+                    "\nlatency test: no live audio stream — the sound leg was not measurable (degraded run)"
+                );
+            }
+        }
+    }
     // Explicit ordering: wgpu surfaces must die before their wl_surfaces.
+    // The audio engine (and its cpal Stream) drops with `app` here too.
     app.outputs.clear();
     tracing::info!("hyprbeat stopped cleanly");
     Ok(())
+}
+
+/// Build the phase-2 time base from CLI intent (I-01, D-16).
+fn build_timing(args: &Args) -> TimingState {
+    let wants_audio = args.audio.is_some() || args.latency_test;
+    if wants_audio {
+        match audio::AudioEngine::start(audio::StartOptions {
+            music: args.audio.as_deref(),
+            volume: args.volume,
+            offset_ms: args.offset_ms,
+            lead_in_ms: 0.0,
+        }) {
+            Ok(engine) => TimingState::Audio(engine),
+            Err(err) => {
+                tracing::error!(
+                    %err,
+                    "cannot start the audio engine — degrading to the wall clock \
+                     (D-16: timing is unranked and the amber degraded band is ON)"
+                );
+                TimingState::DegradedWall(audio::clock::Clock::new_wall(args.offset_ms))
+            }
+        }
+    } else if args.no_audio {
+        tracing::warn!("--no-audio: forced degraded wall-clock path (D-16 validation instrument)");
+        TimingState::DegradedWall(audio::clock::Clock::new_wall(args.offset_ms))
+    } else {
+        TimingState::PlainWall
+    }
 }

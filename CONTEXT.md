@@ -5,17 +5,26 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-12 — **phase 1 → DONE** (validation run 3 + §3.6
-> spot-checks complete, dev machine, Hyprland 0.57.1). Exit criteria and
-> probes all green: gradient live at 100 % (~27.4 fps @ 30 cap), test card
-> sharp at 100 % + 125 %, headless PNG confirmed, input probes PASS on an
-> empty workspace (pointer/buttons, 4596 relative deltas, 65 keys — D-28).
-> §3.6 measured: visible 0.7–1.0 % of one core (≤ 2 % PASS), RAM 53 MB
-> (≤ 150 MB PASS), cold start ~0.3 s (PASS); **occluded ≈ visible ≈ 1 % — the
-> "~0 % free pause" does not exist on Hyprland 0.57.1** (callbacks keep
-> flowing under verified true fullscreen — D-29/Q-7; phase 7 inherits real
-> pause duty).
-> **Current phase**: 1 — **DONE**. Next: phase 2 (audio engine, §10 row 2).
+> **Last updated**: 2026-11-13 — **phase 2 → CODE COMPLETE, awaiting dev-machine
+> validation** (`dev/validate-phase2.sh`; the 2026-11-12 session built the audio
+> engine:
+> cpal raw callback as the clock (§3.3, I-01), symphonia decode + SHA-256
+> cache, RT-safe mixer with SPSC sound queue, degraded wall-clock path
+> (D-16) with an amber shader band as the I-12 stand-in, SIGUSR1/2 pause /
+> resume dev hook (D-33), `--latency-test` instrument, criterion benches.
+> 2026-11-13 re-delivery note: the zip from the interrupted 11-12 session never
+> reached the dev machine (its tree was still Phase-1 — `validate-phase2.sh`
+> and the `audio` bench target were missing there). Tree unchanged since; re-verified
+> before re-sending: zip↔tree byte-identical, script exec bits intact, every
+> log-line anchor the script greps resolves to a real source string,
+> `cargo fmt --check` re-run green. Full clippy/test re-run happens on the dev
+> machine as validate-phase2.sh step 0b (this sandbox was recycled and lost
+> root/alsa headers for a native rebuild).
+> All offline gates pass in a build sandbox: 82 unit tests, fmt, clippy
+> -D warnings; benches: clock 6.7 ns, 512-frame mix 2.9 µs, 10 s resample 39 ms.)
+> **Current phase**: 2 — **IN PROGRESS (code complete; validation pending on
+> the dev machine)**. Next: run `dev/validate-phase2.sh` on the dev machine,
+> record results, then phase 3 (beatmap parsing, §10 row 3).
 
 ---
 
@@ -267,6 +276,11 @@ runs 24/7 on people's desktops.
 *Phase-1 status: versions are pinned in `Cargo.toml` with a committed
 `Cargo.lock` (see D-25 for the realized stack and the wgpu-30 specifics).*
 
+*Phase-2 status: `cpal 0.15` + `symphonia 0.5` (mp3/ogg/vorbis/flac/wav) +
+`sha2` + `directories` landed per D-30/D-31/D-32; `calloop` gained the
+`signals` feature (D-33); criterion is dev-only (D-36). `Cargo.lock`
+re-committed.*
+
 ---
 
 ## 5. Module layout
@@ -274,6 +288,9 @@ runs 24/7 on people's desktops.
 ```
 src/
 ├── main.rs               entry: config load, wayland connect, calloop setup
+│                         (thin shell over the lib.rs facade — D-36)
+├── lib.rs                library facade (modules + crate Error) so benches
+│                         and tests can import them
 ├── config/
 │   ├── mod.rs            Config struct, load/validate/merge (defaults<file<CLI)
 │   ├── theme.rs          Color newtype (hex parse, fail-loud), presets
@@ -281,12 +298,14 @@ src/
 ├── wayland/
 │   ├── mod.rs            connection, registry, outputs (one surface per output)
 │   ├── surface.rs        layer-shell surface, mode switching (§3.4)
-│   └── input.rs          pointer/kbd/touch/tablet → game events; raw mouse deltas via zwp_relative_pointer_v1 for [input] sensitivity (§6)
+│   ├── input.rs          pointer/kbd/touch/tablet → game events; raw mouse deltas via zwp_relative_pointer_v1 for [input] sensitivity (§6)
+│   ├── probe.rs          §14 diagnostic input probe (phase 1)
+│   └── latency.rs        --latency-test tap recorder + report (phase 2)
 ├── audio/
-│   ├── mod.rs            cpal stream setup (f32, 48kHz, output callback)
-│   ├── clock.rs          §3.3
-│   ├── mixer.rs          sample-accurate mix of music + hitsounds
-│   └── decode.rs         symphonia → f32 mono/stereo buffer cache
+│   ├── mod.rs            cpal stream setup (f32, native-rate-first), degrade
+│   ├── clock.rs          §3.3 (+ D-16 wall fallback + pause/rebase)
+│   ├── mixer.rs          sample-accurate mix of music + hitsounds (I-02/D-31)
+│   └── decode.rs         symphonia → f32, SHA-256 cache, sinc resampler
 ├── beatmap/
 │   ├── mod.rs
 │   ├── osu.rs            .osu text parser (v14; see §5.1)
@@ -666,6 +685,13 @@ scoring math (§11 I-09), never in the live game.
 | D-27 | **[SUPERSEDED by D-28 — probe conclusions (b) and (c) were confounded artifacts; (a) stands]** Phase-1 input probe v1 (Hyprland 0.57.1): (a) background-layer `on_demand` keyboard interactivity is protocol-supported; (b) relative pointer delivers nothing → `raw_input = false`; (c) zero pointer events observed | Probe v1 ran with a terminal window on the desktop, which correctly captured all pointer/keyboard input (windows sit above the background layer). (a) was confirmed by run 3; (b)/(c) were measurement error |
 | D-28 | Probe v2 (2026-11-12, Hyprland 0.57.1, EMPTY workspace): background-layer surfaces receive FULL input — `wl_pointer` enter/button/motion, `zwp_relative_pointer_v1` deltas (4596 events in 10 s), sustained keyboard delivery (65 key events under auto-granted focus). `raw_input = true` stays the v0.1 default as designed; no `Layer::Bottom` workaround needed. Protocol for all future input probes: run on an EMPTY workspace (windows above the background layer legitimately consume input — that IS the wallpaper-mode passthrough working). | Corrects D-27(b)/(c); best-case outcome for §6 `[input]` and the §3.4 T1 "click desktop → play" transition — both mechanisms confirmed deliverable |
 | D-29 | Hyprland 0.57.1 does **not** stop frame callbacks to a background-layer surface under true fullscreen occlusion (run 6: EasyEffects, opaque, `fullscreen: 2` verified via `hyprctl activewindow`, waybar killed, 35 s) — callbacks continued at ~165 Hz (two reports dipped to ~132/106 Hz during the window's startup churn; never stopped), rendered=137/5 s, watchdog_rearms=0, CPU 0.8–1.0 % ≈ visible cost. §3.5 free-pause assumption falsified on this machine; §3.6 occluded budget amended to ≈ visible (≤ 2 %); real pause = phase-7 mode switch (stop requesting frames). Caveat: gpu-screen-recorder was running during the test (capture may force full-scene compositing — optional retest without it) | Run 6 of the §3.6 spot-checks; runs 1–5 hit confounds (maximize-variant keybind, translucent browser/kitty, one exit-127 no-op run) |
+| D-30 | Audio output config: open the cpal stream **at the decoded file's native rate** when the device advertises it (PipeWire always does), else fall back to a device-supported rate with the decode resampled at load time (windowed-sinc, cutoff 0.85·lower-Nyquist, 24 zero-crossings/side — measured ≈ 63 dB worst-case SNR; resampling NEVER happens in RT). The clock then counts exactly the file's samples in the common case. Cache stores the **native-rate** decode so it stays valid across sessions regardless of negotiated stream rate | Exact clock math at file rate for free; PipeWire resamples server-side with a better resampler than we would ship; the client-side sinc only covers the rare ALSA-direct mismatch (its cutoff is deliberately below the textbook 0.95: integer-spaced taps at near-Nyquist cutoff make the truncated kernel's alternating lobes reinforce at Nyquist — measured flat ≈1.6× gain, 15 dB SNR; 0.85/24-taps measures 63+ dB) |
+| D-31 | I-02 made concrete for the mixer: the RT callback only touches single-word atomics (`samples` via one `fetch_add` per callback; `song_start`/`paused`/volume/envelope as relaxed loads/stores), a pre-allocated bounded SPSC queue (64 events) + fixed 8-voice array via `UnsafeCell` state owned by the single callback thread, and writes into the caller's buffer. **No locks, no allocation, no `tracing` (it allocates), no panic-capable indexing.** Diagnostics are counted in atomics (queue-full drops, voice exhaustion, clipped frames) and read by the main tick | The "ONLY AtomicU64::fetch_add" wording of I-02 is the clock-counter mechanism specifically; other one-word state must cross the boundary too. Recorded here so nobody re-litigates the wording later |
+| D-32 | Decode cache format v1 ("HBD1" magic): 18-byte little-endian header (channels u16, rate u32, frames u64) + interleaved f32 LE payload, keyed by SHA-256 of the SOURCE file at `~/.cache/hyprbeat/decoded/<sha256>.f32`, written atomically (tmp+rename); a corrupt/failed cache entry never fails the load — it re-decodes (I-08 posture) | Native-rate payload keeps entries device-independent; content addressing gives dedup for the phase-3 library (§5.2) |
+| D-33 | Phase-2 dev hooks: **SIGUSR1 = pause, SIGUSR2 = resume** (with §3.3 rebase), and `--latency-test` reuses the probe-style keyboard binding (empty workspace + on_demand). Signals are registered BEFORE the audio engine starts so the cpal thread inherits the blocked mask (an unmasked audio thread would take USR1's default terminate action). Both retire in phase 7 when real mode switching + the control socket land | Scriptable pause validation without input machinery (`dev/validate-phase2.sh` step 3); calloop's signalfd source is the mechanism |
+| D-34 | Bundled hitsounds are ORIGINAL: `dev/gen_assets.py` (committed, seeded, deterministic) synthesized `assets/hitsounds/{normal,clap,whistle,finish}.wav` (16-bit PCM 44.1k mono) and `assets/test-tone.wav` (12 s, 440 Hz with 2 Hz amplitude beats — the sync/pause validation signal). Embedded via `include_bytes!`. Provenance audit = script + `assets/hitsounds/NOTICE.md` (I-03) | Zero third-party audio bytes in the repo; the test tone doubles as an audible+visible sync reference for validation |
+| D-35 | I-12 phase-2 stand-in: the degraded wall clock shows as a **pulsing amber band along the top edge of the shader output** (no text renderer exists until phase 8's cosmic-text). `--no-audio` forces the path for validation. The real "⚠ timing degraded — no audio" HUD string lands in phase 8; anything silent remains a bug | The invariant demands visibility NOW, not in phase 8; a shader band is cheap and unmissable |
+| D-36 | Criterion added as a dev-dependency ONLY (`default-features = false` + `cargo_bench_support`) with `benches/audio.rs` under `harness = false`; the release dependency tree is untouched (§4). A `src/lib.rs` facade exists so benches can import the modules (binary stays thin) | §12.3 mandates criterion benches for the clock math from phase 2 on; dev-dep-only keeps the shipped tree small |
 
 ---
 
@@ -675,7 +701,7 @@ scoring math (§11 I-09), never in the live game.
 |---|---|---|---|
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
-| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ⬜ |
+| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | 🔶 **IN PROGRESS — code complete 2026-11-12, awaiting dev-machine validation** (`dev/validate-phase2.sh`). Offline gates already green in a build sandbox: 82 unit tests (clock pause/rebase/lead-in/degrade, mixer sample accuracy + SPSC + diagnostics, decode roundtrip + cache corruption + resampler SNR/anti-alias, latency report math), `cargo fmt --check`, `cargo clippy -D warnings`, criterion benches (clock 6.7 ns, pause+resume 8.2 ns, 512-frame stereo mix 2.9 µs ≈ 0.03 % of its 10.7 ms period, 10 s stereo resample 39 ms). Remaining: live run on the dev machine (sync visible, cache miss→hit, scripted SIGUSR1/2 freeze+rebase, amber-band degraded path, `--latency-test` ≤ 25 ms). |
 | **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ⬜ |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
@@ -797,6 +823,11 @@ absolute XDG paths** (§5.2) and never relative to the repo. Conventions:
   *Phase-1 status: all three gates already pass offline (27 tests).*
 - **Benchmarks** (phase 2+): criterion for clock math + slider LUT; manual
   latency measurement via `--latency-test` flag (tap-to-sound offset report).
+  *Phase-2 status: `benches/audio.rs` exists and runs (`cargo bench`):
+  clock time 6.7 ns, pause+resume cycle 8.2 ns, 512-frame stereo mix 2.9 µs
+  (≈0.03 % of the 10.7 ms callback period — I-02 headroom), 10 s stereo
+  44.1→48 kHz resample 39 ms. `--latency-test` implemented (D-33). The slider
+  LUT bench lands with phase 6.*
 - **Logging**: `tracing` + `tracing-subscriber`, `RUST_LOG=hyprbeat=debug`.
   Add to crate stack in phase 1.
 
@@ -874,6 +905,27 @@ adds the new one, and updates dependent sections.
   per 5 s, watchdog_rearms=0), CPU stayed 0.8–1.0 %. Recorded as D-29;
   §3.5/§3.6 amended; real pause duty moved to phase 7. (gpu-screen-recorder
   was running; optional retest without it.)
+- **Q-8 (new, 2026-11-12, phase 2)**: does the dev machine's default output
+  (PipeWire's ALSA compat node) accept the **file's native rate** and f32
+  sample format as cpal sees it, making the clock count exactly the file's
+  samples (D-30's happy path)? The `audio stream started` log line prints
+  the negotiated `rate=`/`channels=` — `dev/validate-phase2.sh` step 2
+  captures it. Answer by recording the printed values for the 44.1 kHz test
+  tone. If the negotiated rate is 48 kHz for a 44.1 kHz file, the fallback
+  resampler engaged (still fine — note the log line "device refused the
+  file's native rate").
+- **Q-9 (new, 2026-11-12, phase 2)**: the `--latency-test` audible-time
+  estimate is `mixed + callback period` — it cannot see the true DAC/output
+  latency beyond the buffer geometry without a microphone (no hardware
+  loop-back on the dev machine). If the p95 estimate passes ≤ 25 ms but a tap
+  still *feels* late, record the discrepancy and consider requesting a
+  smaller `BufferSize::Fixed` from cpal (tune only with data).
+- **Q-10 (new, 2026-11-12, phase 2)**: mp3/ogg/vorbis decode paths are unit-
+  tested only via WAV round-trips (the committed assets are WAV); the dev
+  machine should spot-check ONE real mp3 from the user's own library through
+  `--audio` during validation (decode + playback + cache hit on re-run). No
+  automated fixture shipped — real `.osz`-grade audio arrives with phase 3's
+  golden files.
 
 ---
 

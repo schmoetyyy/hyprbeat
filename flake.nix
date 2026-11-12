@@ -33,12 +33,14 @@
         ] ++ runtimeLibs;
 
         # wgpu's Vulkan backend loads libvulkan at runtime; inside the
-        # devshell, point the loader at our libraries.
+        # devshell, point the loader at our libraries. libasound covers
+        # cpal's ALSA host (PipeWire's ALSA node satisfies it at runtime).
         shellHook = ''
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath runtimeLibs}:$LD_LIBRARY_PATH"
           export RUST_LOG="hyprbeat=info"
-          echo "hyprbeat devshell — try: cargo run -- --testcard --timeout 10"
+          echo "hyprbeat devshell — try: cargo run -- --audio assets/test-tone.wav --timeout 12"
           echo "phase-1 validation: dev/validate-phase1.sh"
+          echo "phase-2 validation: dev/validate-phase2.sh"
         '';
       };
 

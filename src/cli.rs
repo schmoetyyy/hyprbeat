@@ -19,14 +19,15 @@ pub const HELP: &str = "\
 hyprbeat — an open-source rhythm game that lives on your desktop background,
 compatible with the osu! beatmap format. Built for Hyprland/Wayland.
 
-Phase 1 preview: ambient gradient wallpaper, frame-callback render loop,
-fractional-scale-correct rendering. Gameplay, audio and maps arrive in later
-phases (see CONTEXT.md §10).
+Phase 2 preview: ambient gradient wallpaper, frame-callback render loop,
+fractional-scale-correct rendering, audio-clock-driven animation (cpal +
+symphonia). Maps, judgement and the config file arrive in phases 3–8
+(see CONTEXT.md §10).
 
 USAGE:
     hyprbeat [OPTIONS]
 
-OPTIONS (phase-1 dev/diagnostic set; clap + config flags land in phase 5):
+OPTIONS (phase-2 dev/diagnostic set; clap + config flags land in phase 5):
         --headless          Render one frame offscreen to a PNG and exit
                             (no compositor required; needs a Vulkan or GLES
                             driver — lavapipe/swrast works)
@@ -37,6 +38,22 @@ OPTIONS (phase-1 dev/diagnostic set; clap + config flags land in phase 5):
         --testcard          Draw the scale test pattern (2 px accent border,
                             1 px grid, checker strip, rings, 1 Hz sweep) over
                             the gradient — use it to judge 125% scaling
+        --audio PATH        Load an audio file (mp3/ogg/flac/wav) and sync the
+                            wallpaper to it: the clock, the animation and
+                            the pause machinery all hang off the audio stream
+                            (CONTEXT.md §3.3). Decodes land in
+                            ~/.cache/hyprbeat/decoded/<sha256>.f32
+        --no-audio          Force the degraded wall-clock path (D-16) even if
+                            an output device exists — validation instrument
+        --volume V          Master volume 0.0–1.0 [default: 0.7]
+        --offset-ms N       Universal audio offset (§3.3): shifts game time
+                            relative to what you hear; negative = earlier
+                            [default: 0]
+        --latency-test      Input → sound → photon report (§3.6, §12.3):
+                            switch to an EMPTY workspace, click the desktop
+                            once for keyboard focus, then TAP keys; every tap
+                            fires a hitsound + flash and is stamped through
+                            the whole pipeline. A summary prints at exit
         --probe             CONTEXT.md §14 Q-1/Q-2 diagnostic: temporarily
                             enable input + keyboard_interactivity=on_demand on
                             the background layer, log what the compositor
@@ -50,6 +67,9 @@ OPTIONS (phase-1 dev/diagnostic set; clap + config flags land in phase 5):
 EXAMPLES:
     hyprbeat --testcard --timeout 10                     # watch the background
     hyprbeat --headless --scale 1.25 --testcard --out /tmp/card.png
+    hyprbeat --audio assets/test-tone.wav --timeout 20   # music-synced animation
+    kill -USR1 <pid> / kill -USR2 <pid>                  # pause / resume (D-33)
+    hyprbeat --latency-test --timeout 30                 # tap-to-sound report
     hyprbeat --probe --timeout 8                         # Q-1/Q-2 verification
 
 Environment: RUST_LOG=hyprbeat=debug for logs, WAYLAND_DEBUG=1 for a protocol
@@ -62,6 +82,8 @@ pub struct Args {
     pub headless: bool,
     /// Q-1/Q-2 input diagnostics (§14): full input region + on_demand keyboard.
     pub probe: bool,
+    /// Tap-to-sound latency report (§3.6, §12.3).
+    pub latency_test: bool,
     /// Draw the scale test pattern.
     pub testcard: bool,
     /// Hard exit deadline. `None` = run until killed.
@@ -74,6 +96,14 @@ pub struct Args {
     pub scale: f64,
     /// Headless PNG destination (defaults into the system temp dir, I-07).
     pub out: Option<PathBuf>,
+    /// Music file to load and sync to (`--audio`, phase 2).
+    pub audio: Option<PathBuf>,
+    /// Force the degraded wall clock even with a working device (D-16 test).
+    pub no_audio: bool,
+    /// Master volume 0..1 (§6 `[general] volume` — CLI stand-in until phase 5).
+    pub volume: f32,
+    /// Universal audio offset in ms (§3.3).
+    pub offset_ms: f64,
     pub help: bool,
     pub version: bool,
 }
@@ -93,11 +123,16 @@ where
 {
     let mut headless = false;
     let mut probe = false;
+    let mut latency_test = false;
     let mut testcard = false;
     let mut idle_fps: u32 = 30;
     let mut size = (1920u32, 1080u32);
     let mut scale = 1.0f64;
     let mut out: Option<PathBuf> = None;
+    let mut audio: Option<PathBuf> = None;
+    let mut no_audio = false;
+    let mut volume = crate::audio::DEFAULT_VOLUME;
+    let mut offset_ms = 0.0f64;
     let mut help = false;
     let mut version = false;
     let mut timeout: Option<Option<Duration>> = None;
@@ -107,9 +142,21 @@ where
         match arg.as_str() {
             "--headless" => headless = true,
             "--probe" => probe = true,
+            "--latency-test" => latency_test = true,
             "--testcard" => testcard = true,
             "-h" | "--help" => help = true,
             "--version" => version = true,
+            "--audio" => {
+                let raw = parse_value(&mut it, "--audio", |s| Ok::<_, String>(s.to_owned()))?;
+                audio = Some(PathBuf::from(raw));
+            }
+            "--no-audio" => no_audio = true,
+            "--volume" => {
+                volume = parse_value(&mut it, "--volume", parse_volume)?;
+            }
+            "--offset-ms" => {
+                offset_ms = parse_value(&mut it, "--offset-ms", parse_offset)?;
+            }
             "--fps" => {
                 idle_fps = parse_value(&mut it, "--fps", parse_fps)?;
             }
@@ -133,6 +180,15 @@ where
 
     if scale == 0.0 {
         return Err("`--scale 0` is not a scale".to_owned());
+    }
+    if no_audio && audio.is_some() {
+        return Err("--no-audio and --audio are mutually exclusive".to_owned());
+    }
+    if no_audio && latency_test {
+        return Err("--latency-test needs an audio stream to fire hitsounds through; it cannot run with --no-audio".to_owned());
+    }
+    if headless && (audio.is_some() || latency_test || no_audio) {
+        return Err("--headless renders a still frame; --audio/--latency-test/--no-audio are live-mode flags".to_owned());
     }
 
     // --timeout: explicit value wins (0 disables); otherwise a mode-dependent
@@ -158,12 +214,17 @@ where
     Ok(Args {
         headless,
         probe,
+        latency_test,
         testcard,
         timeout,
         idle_fps,
         size,
         scale,
         out,
+        audio,
+        no_audio,
+        volume,
+        offset_ms,
         help,
         version,
     })
@@ -220,6 +281,28 @@ fn parse_scale(s: &str) -> Result<f64, String> {
     Ok(scale)
 }
 
+/// `--volume V`: master volume 0..1.
+fn parse_volume(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err("volume must be between 0.0 and 1.0".to_owned());
+    }
+    Ok(v)
+}
+
+/// `--offset-ms N`: universal audio offset in ms (§3.3); clamped to a sane
+/// ±10 s so a typo cannot invert the game's sense of time.
+fn parse_offset(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    if !v.is_finite() {
+        return Err("offset must be a finite number".to_owned());
+    }
+    if v.abs() > 10_000.0 {
+        return Err("offset is limited to ±10 000 ms".to_owned());
+    }
+    Ok(v)
+}
+
 /// `--timeout SECS`: a non-negative duration in (fractional) seconds; `0`
 /// means "no timeout".
 fn parse_timeout(s: &str) -> Result<Option<Duration>, String> {
@@ -246,12 +329,60 @@ mod tests {
     #[test]
     fn defaults() {
         let a = args(&[]).unwrap();
-        assert!(!a.headless && !a.probe && !a.testcard);
+        assert!(!a.headless && !a.probe && !a.testcard && !a.latency_test);
         assert_eq!(a.timeout, Some(DEFAULT_LIVE_TIMEOUT));
         assert_eq!(a.idle_fps, 30);
         assert_eq!(a.size, (1920, 1080));
         assert_eq!(a.scale, 1.0);
         assert_eq!(a.frame_interval_ms(), 1000.0 / 30.0);
+        assert_eq!(a.audio, None);
+        assert!(!a.no_audio);
+        assert!((a.volume - 0.7).abs() < 1e-6);
+        assert_eq!(a.offset_ms, 0.0);
+    }
+
+    #[test]
+    fn audio_flags() {
+        let a = args(&[
+            "--audio",
+            "/tmp/song.mp3",
+            "--volume",
+            "0.25",
+            "--offset-ms",
+            "-12.5",
+        ])
+        .unwrap();
+        assert_eq!(a.audio, Some(PathBuf::from("/tmp/song.mp3")));
+        assert!((a.volume - 0.25).abs() < 1e-6);
+        assert_eq!(a.offset_ms, -12.5);
+    }
+
+    #[test]
+    fn audio_flag_conflicts() {
+        assert!(args(&["--no-audio", "--audio", "x.mp3"]).is_err());
+        assert!(args(&["--no-audio", "--latency-test"]).is_err());
+        assert!(args(&["--headless", "--audio", "x.mp3"]).is_err());
+        assert!(args(&["--headless", "--latency-test"]).is_err());
+        assert!(args(&["--headless", "--no-audio"]).is_err());
+        // but --latency-test WITH an --audio file is legal (taps over music)
+        assert!(args(&["--latency-test", "--audio", "x.mp3"]).is_ok());
+    }
+
+    #[test]
+    fn volume_and_offset_bounds() {
+        assert!(args(&["--volume", "1.0"]).is_ok());
+        assert!(args(&["--volume", "1.5"]).is_err());
+        assert!(args(&["--volume", "-0.1"]).is_err());
+        assert!(args(&["--offset-ms", "10000"]).is_ok());
+        assert!(args(&["--offset-ms", "10001"]).is_err());
+        assert!(args(&["--offset-ms", "inf"]).is_err());
+    }
+
+    #[test]
+    fn latency_test_flag_parses() {
+        let a = args(&["--latency-test"]).unwrap();
+        assert!(a.latency_test);
+        assert_eq!(a.timeout, Some(DEFAULT_LIVE_TIMEOUT));
     }
 
     #[test]

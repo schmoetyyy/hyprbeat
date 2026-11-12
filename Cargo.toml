@@ -20,7 +20,8 @@ smithay-client-toolkit = "0.21.1"
 # link-time dependency (present on any Wayland desktop).
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
-calloop = "0.14"
+# `signals`: phase-2 dev hook — SIGUSR1/SIGUSR2 pause/resume (D-33).
+calloop = { version = "0.14", features = ["signals"] }
 calloop-wayland-source = "0.4"
 wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "gles"] }
 raw-window-handle = "0.6"
@@ -28,6 +29,39 @@ pollster = "0.4"
 png = "0.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# ---- phase 2: audio engine (§4; D-03/D-04/D-16) ----
+# cpal raw output callback = the clock + the latency floor (NOT rodio).
+# Needs alsa-lib at build time on Linux; the flake devshell already ships it
+# (§12.1).
+cpal = "0.15"
+# Decode mp3/ogg/flac/wav — the formats actually found in .osz zips. Pure
+# Rust, no system deps. `pcm` covers uncompressed WAV/FLAC data paths.
+symphonia = { version = "0.5", default-features = false, features = [
+    "mp3",
+    "ogg",
+    "vorbis",
+    "flac",
+    "wav",
+    "pcm",
+] }
+# SHA-256 content addressing for the decode cache + library dedup (§5.2).
+sha2 = "0.10"
+# XDG base dirs (I-07): ~/.cache/hyprbeat/decoded/<sha256>.f32 etc.
+directories = "5"
+
+[dev-dependencies]
+# §12.3 "Benchmarks (phase 2+): criterion for clock math". Dev-dependency
+# only — the release dependency tree stays small (§4, D-36).
+# `cargo_bench_support` without the default features keeps the tree minimal
+# (no plotters/rayon) while still running under `cargo bench`.
+criterion = { version = "0.5", default-features = false, features = [
+    "cargo_bench_support",
+] }
+
+# criterion replaces the libtest harness for its benches (§12.3)
+[[bench]]
+name = "audio"
+harness = false
 
 [profile.release]
 # Defaults are fine for v0.1; §3.6 budgets are measured before any tag.
