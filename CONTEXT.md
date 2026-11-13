@@ -725,7 +725,7 @@ scoring math (§11 I-09), never in the live game.
 |---|---|---|---|
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
-| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | 🔶 **IN PROGRESS — code complete; dev-machine validation run 1 done 2026-11-13: 9 pass / 4 fail → fixed, run 2 pending.** Run 1: build+fmt+clippy+82 tests, headless PNG, music sync (user y), degraded amber band (user y), SIGUSR1/2 pause+resume logged — all PASS. 4 FAILs root-caused: (1–2) cache miss/hit greps — script bug, tracing prints string fields quoted (D-38; fixed: quote-tolerant + ANSI-strip + cache=% bare + deterministic cache wipe per run); (3) pause/rebase freeze math unreadable — same field-grep bug + position-based expectations rewritten marker-based (`paused=true/false` stat lines, 26 s run); (4) REAL defect — §3.6 latency budget FAIL: device default buffer 32 ms/1536 frames, p95 audible 62.58 ms > 25 ms (p50 50.52 ms; tap→mixed p50 18.52/p95 30.58 ms; frame p50 19.78/p95 33.78 ms) → D-37: fixed 256-frame buffer + `--buffer`, fallback to default. `cargo bench --bench audio` compiles + runs (user interrupted it early — criterion takes ~30–60 s; not stuck). Run 2 must re-verify all of it and record Q-8 (rate/channels) + Q-11 (actual buffer). 2026-11-13 later: the fix drop was initially DOA — E0382 in `build_stream` (D-39) killed build/bench/step 0; fixed same day + offline gates green in the producing sandbox (84 tests); run 2 can actually start now. |
+| **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ✅ **DONE (2026-11-12, run 2 at commit 851e68b): dev/validate-phase2.sh = 14/14.** Music sync (user y) and degraded amber band (user y). Q-8 answered: stream `rate=44100 channels=2` — the file's native rate accepted (mono source duplicated to stereo), clock counts the file's samples. §5.2 cache: miss→hit verified, entries under `~/.cache/hyprbeat/decoded/<sha256>.f32` (layout bug fixed en route: `cache_path` had written at the cache root, so the script's wipe never took effect). Pause/rebase: freeze at 1931 ms, final 4933 (expected ≈4931). D-37 live: `buffer=fixed-256`, observed callback period 1.33 ms (was 32 ms device default). §3.6: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 / p95 2.60 ms (≤ 25 ms — PASS, Q-9 estimate); tap→flash p50 13.31 / p95 35.06 ms. Benches: mix 512-frame stereo 2.15 µs (0.16 % of the 1.33 ms period); clock time_ms 1.75 ns; pause+resume 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms (one-shot, off-RT). En-route fixes: D-37/D-38 script greps, E0382 in `build_stream` (D-39), cache layout. Optional spot checks (cold start ≤ 2 s, RSS ≤ 150 MB, CPU ≤ 2 %) deferred — see close-out open items. |
 | **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ⬜ |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
@@ -931,42 +931,41 @@ adds the new one, and updates dependent sections.
   per 5 s, watchdog_rearms=0), CPU stayed 0.8–1.0 %. Recorded as D-29;
   §3.5/§3.6 amended; real pause duty moved to phase 7. (gpu-screen-recorder
   was running; optional retest without it.)
-- **Q-8 (new, 2026-11-12, phase 2)**: does the dev machine's default output
+- **Q-8 (new, 2026-11-12, phase 2)**: ~~does the dev machine's default output
   (PipeWire's ALSA compat node) accept the **file's native rate** and f32
   sample format as cpal sees it, making the clock count exactly the file's
-  samples (D-30's happy path)? The `audio stream started` log line prints
-  the negotiated `rate=`/`channels=` — `dev/validate-phase2.sh` step 2
-  captures it. *Run-1 status 2026-11-13: not yet answered — the rate/channels
-  extraction came back empty (field greps broke on the dev machine's log
-  format; D-38). Run 2's step 2 prints the full line either way and answers
-  this. If the negotiated rate is 48 kHz for the 44.1 kHz test tone, the
-  fallback resampler engaged (still fine — note the log line "device refused
-  the file's native rate").*
-- **Q-9 (new, 2026-11-12, phase 2)**: the `--latency-test` audible-time
-  estimate is `mixed + callback period` — it cannot see the true DAC/output
+  samples (D-30's happy path)?~~ **ANSWERED 2026-11-12 (run 2): YES** —
+  `audio stream started` logged `rate=44100 channels=2` for the mono 44.1 kHz
+  test tone (mixer duplicates mono into stereo), and no "device refused the
+  file's native rate" line appeared, so the D-30 resampler fallback never
+  engaged and the audio clock counts the file's own samples. Recorded in
+  §10 row 2.
+- **Q-9 (new, 2026-11-12, phase 2)**: ~~the `--latency-test` audible-time
+  estimate is `mixed + callback period`; it cannot see the true DAC/output
   latency beyond the buffer geometry without a microphone (no hardware
-  loop-back on the dev machine). If the p95 estimate passes ≤ 25 ms but a tap
-  still *feels* late, record the discrepancy and consider requesting a
-  smaller `BufferSize::Fixed` from cpal (tune only with data).
-  *Run-1 status 2026-11-13: p95 audible 62.58 ms — FAIL, root cause measured:
-  the device-chosen period was 32 ms (1536 frames), so even instant mixing
-  could not fit the budget. Q-9's contingency is now ENGAGED as D-37 (default
-  256-frame fixed buffer + `--buffer`); run 2 re-measures. Re-open only if
-  p95 still fails with a small period.*
+  loop-back on the dev machine).~~ **ANSWERED for v0.1 (run 2, 2026-11-12)**:
+  with D-37 live the estimate reads tap→sound p50 1.98 ms / p95 2.60 ms —
+  ~10× under the 25 ms budget, so estimate-vs-truth is no longer
+  decision-relevant. The microphone loop-back stays parked in the close-out
+  open items; re-open only if taps feel late or a real audible budget is set.
 - **Q-10 (new, 2026-11-12, phase 2)**: mp3/ogg/vorbis decode paths are unit-
   tested only via WAV round-trips (the committed assets are WAV); the dev
   machine should spot-check ONE real mp3 from the user's own library through
   `--audio` during validation (decode + playback + cache hit on re-run). No
   automated fixture shipped — real `.osz`-grade audio arrives with phase 3's
   golden files.
-- **Q-11 (new, 2026-11-13, phase 2)**: does PipeWire's ALSA compat node
+- **Q-11 (new, 2026-11-13, phase 2)**: ~~does PipeWire's ALSA compat node
   actually honor cpal's `BufferSize::Fixed(256)` (D-37), or does it clamp /
-  adjust the period? Answer from run 2: the `--latency-test` report prints
-  the ACTUAL period (observed `frames_per_callback`), and the `audio stream
-  started` line prints `buffer=fixed-256` vs `buffer=device default (fixed
-  refused)`. If the actual period stays ≈ 32 ms despite the request, record
-  it here and fall back to tuning inside what PipeWire offers (or a dated
-  §3.6 waiver per the budget rule).
+  adjust the period?~~ **ANSWERED 2026-11-12 (run 2): YES — accepted, and
+  served smaller** — the stream logged `buffer=fixed-256` (fixed request
+  accepted, no "fixed refused" fallback to the device default), and the
+  `--latency-test` report observed an actual callback period of **1.33 ms**,
+  smaller than the 5.3 ms the request implies. The arithmetic (1.33 ms ≈ 64
+  frames @ 48 kHz; run-1's 32 ms default = 1536 frames @ 48 kHz) suggests the
+  node serves its own 48 kHz-domain quantum rather than enlarging our
+  request. The observed period is what feeds the §3.6 budget — p95 audible
+  2.60 ms vs 25 ms, ~10× headroom; exact frames-per-callback is in the kept
+  latency logs if it ever matters.
 - **Q-12 (new, 2026-11-13, phase 2)**: run 1's redirected logs defeated
   field greps (`rate=`, `song_ms=`) while message greps matched — consistent
   with ANSI escapes painted around field names/`=` (tracing-subscriber 0.3.23
@@ -980,9 +979,6 @@ adds the new one, and updates dependent sections.
 
 ---
 
-*End of CONTEXT.md. If you are an AI session reading this: welcome back.
-Check §10, do phase 1, keep the invariants, leave the file better than you
-found it.*
 
 <!-- ---------------------------------------------------------------- -->
 <!-- Phase-2 close-out record (appended 2026-11-12). Roadmap sections
@@ -1005,7 +1001,7 @@ Fixes landed during phase-2 validation:
    pass). `write_cache` already created `path.parent()`, so no change needed
    there. Layout is pinned by `decode_file_cached_hits_second_time`.
 
-### Measurements — record in §10 row 2 / §14
+### Measurements — mirrored in §10 row 2 + Q-8/Q-9/Q-11
 
 - Q-8: stream rate=44100 channels=2 (mono source duplicated to stereo)
 - D-37: buffer=fixed-256 frames; observed callback period 1.33 ms
@@ -1040,3 +1036,7 @@ Fixes landed during phase-2 validation:
 - Commit style: lowercase prefix + D-/§- refs, e.g. `docs(context): …`.
 - Read this file top-to-bottom before planning; the roadmap above decides
   what phase 3 contains.
+
+*End of CONTEXT.md. If you are an AI session reading this: welcome back.
+Check §10, do the next unfinished phase (phase 3), keep the invariants,
+leave the file better than you found it.*
