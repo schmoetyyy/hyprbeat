@@ -983,3 +983,60 @@ adds the new one, and updates dependent sections.
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
 Check §10, do phase 1, keep the invariants, leave the file better than you
 found it.*
+
+<!-- ---------------------------------------------------------------- -->
+<!-- Phase-2 close-out record (appended 2026-11-12). Roadmap sections
+     above remain authoritative for phase numbering. -->
+
+## Phase-2 close-out (2026-11-12) — VALIDATED 14/14
+
+Gate: `nix develop -c dev/validate-phase2.sh` → 14 passed, 0 failed.
+Commits: `22dab61` (phase 2: audio engine + run-1 fixes, D-37/D-38) → `851e68b`
+(decode cache under `decoded/` per §5.2).
+
+Fixes landed during phase-2 validation:
+
+1. E0382 in `src/audio/mod.rs`: the `Arc` is now cloned BEFORE it is moved
+   into the cpal `data_callback` closure (the closure body no longer clones
+   an already-moved value).
+2. Cache layout: `cache_path()` now nests under `<cache_root>/decoded/`
+   (previously wrote at the cache root, so the phase-2 script's wipe of
+   `…/hyprbeat/decoded` never took effect and "first run = miss" could never
+   pass). `write_cache` already created `path.parent()`, so no change needed
+   there. Layout is pinned by `decode_file_cached_hits_second_time`.
+
+### Measurements — record in §10 row 2 / §14
+
+- Q-8: stream rate=44100 channels=2 (mono source duplicated to stereo)
+- D-37: buffer=fixed-256 frames; observed callback period 1.33 ms
+- §5.2 cache: miss→hit verified; entry `~/.cache/hyprbeat/decoded/<sha256>.f32`
+  (test-tone: 2,116,818 B = 12 s × 44.1 kHz × mono × 4 B + 18 B header)
+- §3.6 latency: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 /
+  p95 2.60 ms (budget ≤ 25 ms — PASS; Q-9 estimate); tap→flash p50 13.31 /
+  p95 35.06 ms (photon ≈ +vsync beyond)
+- pause/rebase: freeze at 1931 ms, final 4933 ms (expected ≈4931)
+- RT cost (`cargo bench --bench audio`): mix 512-frame stereo callback
+  2.15 µs (0.16 % of the 1.33 ms period); clock/time_ms 1.75 ns;
+  pause+resume cycle 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms
+  (one-shot, off-RT, 0.3 % of real-time)
+
+### Open items (carried to the next session)
+
+- [ ] §3.6 optional spot checks: cold start ≤ 2 s (cache warm), RSS ≤ 150 MB,
+      visible CPU ≤ 2 % of one core
+- [ ] decode a REAL song (minutes long; f32 ≈ 50 MB) — cache + cold start
+- [ ] Q-9: microphone loopback to replace the mixed+period audible estimate
+- [ ] tap→flash p95 ≈ 34–35 ms — frame pacing, if a photon budget is set
+
+### Handoff notes for the next session
+
+- Repo lives on the user's machine (`~/hyprbeat`, Nix flake devshell). The
+  assistant has NO filesystem access to it: request command runs and pasted
+  output; deliver changes as a full zip or exact terminal commands only.
+- Always answer in English.
+- Entry points: `nix develop -c dev/validate-phase{1,2}.sh` (phase-2 has two
+  interactive y/N prompts — user must be present); `nix develop -c cargo
+  bench --bench audio` ≈ 40 s, tables print at the end.
+- Commit style: lowercase prefix + D-/§- refs, e.g. `docs(context): …`.
+- Read this file top-to-bottom before planning; the roadmap above decides
+  what phase 3 contains.
