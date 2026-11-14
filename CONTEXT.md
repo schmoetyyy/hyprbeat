@@ -365,14 +365,19 @@ Text format, `[Section]` headers, `key: value` / `key,value,...` lines.
         uninherited,effects` — `uninherited=1` lines are BPM anchors
   (`beatLength` = ms per beat); `uninherited=0` inherit: slider velocity
   multiplier = `-100 / beatLength` (e.g. beatLength=-50 → 2× speed), volume,
-  kiai flag in `effects` bit 1.
+  kiai = `effects` bit 0 (value 1); bit 3 (value 8) omits the first bar
+  line — wiki-verified 2026-11-13 (earlier "bit 1" wording was wrong).
 - **[HitObjects]**: `x,y,time,type,hitSound,objectParams,hitSample`
   - `type` bitmask: `1` circle, `2` slider, `8` spinner, `4` new combo,
     bits 4–6 = colour skip.
   - circle: no params. spinner: `endTime`.
-  - slider params: `curveType:curvePoints|slides|length|edgeHitsounds|
-    edgeAdditions` — curveType `B` (bezier; repeated ctrl points = segment
-    break), `C` (Catmull-Rom), `L` (linear), `P` (perfect circle through pts).
+  - slider params, comma-separated after `hitSound`:
+    `curveType|curvePoints,slides,length,edgeSounds,edgeSets,hitSample` —
+    the pipes live INSIDE the first field (`B|200:200|250:200`), and
+    edgeSounds/edgeSets are pipe-lists in their own fields
+    (wiki-verified 2026-11-13). curveType `B` (bezier; repeated ctrl
+    points = segment break), `C` (centripetal catmull-rom), `L` (linear),
+    `P` (perfect circle, max 3 points — more degrade to bezier).
   - Coordinates 0–512 × 0–384.
 - Numbers may be `int` or `float` depending on field; parse leniently, store f32.
 
@@ -558,7 +563,9 @@ implementing.
 - Parse curve into segments (type per segment from control points, §5.1).
 - **Bézier** segments: repeated control points mark breaks; concatenate.
 - **Catmull-Rom**: uniform, through all control points.
-- **Perfect (P)**: circle through first three points, ignore extras.
+- **Perfect (P)**: circle through first three points; more than three
+  points degrade the curve to bezier (wiki-verified 2026-11-13 —
+  phase 6 replicates that degradation, not "ignore extras").
 - **Length**: slider duration = `length / (SliderMultiplier · SV) · beatLength`
   with SV from the active inherited timing point.
 - Convert every path to a **polyline with equidistant arc-length
@@ -716,6 +723,7 @@ scoring math (§11 I-09), never in the live game.
 | D-37 | **Output buffer: request `BufferSize::Fixed(256)` by default** (≈5.3 ms @48 kHz), `--buffer N` CLI (16–8192, 0 = device default); if the host refuses a fixed size, fall back to the device default with a warn log — never fatal (D-16 posture). Rationale is measured, not vibes: validation run 1 on the dev machine negotiated a 32 ms / 1536-frame device default period, so the §3.6 input→sound budget (p95 audible ≤ 25 ms) was arithmetically unreachable (measured p95 62.58 ms = mixed 30.58 + period 32); this is Q-9's documented contingency engaged with data. The actual negotiated geometry is still observed at runtime (`frames_per_callback`) and printed by `--latency-test`, so run 2 verifies what PipeWire really gave us (Q-11) | The callback-rate cost is bounded by the mix bench (512-frame mix = 2.9 µs → 256-frame callbacks at ~187 Hz cost ≪ 1 % core); the budget is the point of the project (D-01) |
 | D-38 | **Log-format contract for validation greps** (learned in run 1): tracing-subscriber's default formatter prints non-message string fields Debug-QUOTED (`cache="miss"`) while numbers print bare; and on the dev machine's redirected logs even numeric field greps (`rate=`, `song_ms=`) matched nothing — consistent with ANSI escapes around field names/`=` (verified against tracing-subscriber 0.3.23 source: field name painted italic, `=` painted dimmed). Fixes, in force from now on: (a) log greps in dev scripts must be ANSI-stripped (`sed $'s/\x1b\[[0-9;]*[mK]//g'`) and quote-tolerant (`cache="?miss"?`); (b) string fields we grep for use the `%` Display sigil to print bare (`cache=%(...)` — music decoded line now does); (c) dev scripts print the FULL matched line on extraction failure so misses self-diagnose; (d) phase scripts keep their log dir when anything fails (path printed) | A grep that silently matches nothing turns a passing system into a FAIL with no evidence; run 1 burned a dev-machine round trip on exactly that |
 | D-39 | **`build_stream` ownership: one `Arc` clone per cpal callback closure** (fix for the E0382 that shipped in the 2026-11-13 fix drop). What happened: that drop was edited in a recycled sandbox that could no longer compile (no alsa/xkb headers), so the callback wiring never got borrow-checked — `let shared = shared.clone();` shadowed the `&Arc` param, the `move` data callback consumed the binding, and the error callback's own `let shared = shared.clone();` then borrowed a moved value. Fix in `src/audio/mod.rs`: the data callback captures its own `shared_data` clone; the error callback clones the ORIGINAL param (both callbacks must own an `Arc` — cpal requires `Send + 'static` closures). Process lesson, in force: **a re-delivery that cannot run at least `cargo check --all-targets` in its own sandbox is not verified** — byte-diff, fmt and grep anchors caught nothing here; this time check + fmt + clippy `-D warnings` + `test --lib` (84 passed) all ran green before sending | E0382-class ownership bugs are invisible to byte-comparisons; "awaiting run 2" was actually "run 2 cannot start". One compile gate in the producing sandbox keeps dev-machine round trips single-purpose |
+| D-40 | Phase-3 parser is OUR OWN pure module (`src/beatmap`, §5.1) — **rosu-pp is NOT added**. §4's verify-in-phase-3 done (docs.rs, rosu-pp 4.0.1, checked 2026-11-13): it exposes a calculation-oriented `Beatmap` parsed via `Beatmap::from_path` (file I/O), a port of lazer's difficulty/PP calculators, with no documented old-format lenient parsing, no raw per-object fields (hitSample / edge sounds / combo skip), and no zero-I/O parse satisfying I-09. The game's loader stays dep-free and pure; rosu-pp stays parked as a candidate only for star-rating/PP display (v0.2+, revisit then). | Own parser keeps the tree small (§4), I-09-pure + unit-testable, and the D-07 posture clean; PP calc is not v0.1 scope. |
 
 ---
 
@@ -966,7 +974,7 @@ adds the new one, and updates dependent sections.
   request. The observed period is what feeds the §3.6 budget — p95 audible
   2.60 ms vs 25 ms, ~10× headroom; exact frames-per-callback is in the kept
   latency logs if it ever matters.
-- **Q-12 (new, 2026-11-13, phase 2)**: run 1's redirected logs defeated
+- **Q-12 (new, 2026-11-13, phase 2)**: ~~run 1's redirected logs defeated
   field greps (`rate=`, `song_ms=`) while message greps matched — consistent
   with ANSI escapes painted around field names/`=` (tracing-subscriber 0.3.23
   paints the name italic + `=` dimmed; D-38), though the same crate versions
@@ -975,7 +983,14 @@ adds the new one, and updates dependent sections.
   on that machine (why escapes landed in a non-tty file) is still unidentified.
   If run 2's logs again contain escapes, inspect one directly (`cat -v` on a
   kept log) and record the finding here; consider
-  `.with_ansi(stderr().is_terminal())` in main.rs as a hard guarantee.
+  `.with_ansi(stderr().is_terminal())` in main.rs as a hard guarantee.~~
+  **CLOSED 2026-11-13 (as moot)**: run 2's greps were clean with the D-38
+  contract (ANSI-strip + `%`-sigil greppable fields) in force, so no script
+  depends on log purity; the run-1 root cause stays unidentified but
+  toothless. The 2-line guard
+  (`.with_ansi(std::io::stderr().is_terminal())` in main.rs) stays listed
+  here as a ready hardening — land it before ever trusting raw redirected
+  logs for a gate again.
 
 ---
 

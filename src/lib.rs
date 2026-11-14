@@ -6,10 +6,11 @@
 //! can reach the modules; the binary in `main.rs` is a thin shell over them
 //! (§12.3 benches, phase 2).
 //!
-//! Phase status (CONTEXT.md §10): 1 DONE, 2 in progress — audio engine
-//! (clock/mixer/decode/engine), beatmaps arrive in phase 3.
+//! Phase status (CONTEXT.md §10): 1–2 DONE, 3 in progress — beatmap parser
+//! (`beatmap`) landed first; .osz import + timeline visualizer next.
 
 pub mod audio;
+pub mod beatmap;
 pub mod cli;
 pub mod config;
 pub mod render;
