@@ -5,47 +5,31 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-13 (later) — **phase 2 → code complete; run-1
-> fixes + D-39 (E0382 compile blocker) fixed; offline gates re-verified green
-> in-session; awaiting dev-machine validation run 2**
-> (2026-11-12 session built the audio engine:
-> cpal raw callback as the clock (§3.3, I-01), symphonia decode + SHA-256
-> cache, RT-safe mixer with SPSC sound queue, degraded wall-clock path
-> (D-16) with an amber shader band as the I-12 stand-in, SIGUSR1/2 pause /
-> resume dev hook (D-33), `--latency-test` instrument, criterion benches.
-> 2026-11-13 re-delivery note: the zip from the interrupted 11-12 session never
-> reached the dev machine (its tree was still Phase-1 — `validate-phase2.sh`
-> and the `audio` bench target were missing there). Tree unchanged since; re-verified
-> before re-sending: zip↔tree byte-identical, script exec bits intact, every
-> log-line anchor the script greps resolves to a real source string,
-> `cargo fmt --check` re-run green. Full clippy/test re-run happens on the dev
-> machine as validate-phase2.sh step 0b (this sandbox was recycled and lost
-> root/alsa headers for a native rebuild).
-> 2026-11-13 D-39 note — that no-rebuild shortcut bit back: the re-delivered
-> tree did NOT compile. The run-1 fix wave had wired the cpal callbacks in
-> `build_stream` so the `move` data closure consumed the one `Arc` clone,
-> leaving the error callback to clone a moved binding (E0382) — build, bench
-> and validate step 0 were all dead on the dev machine. Fixed (one clone per
-> closure) and this time genuinely verified: the sandbox regained a rustup
-> toolchain and stub pkg-config files stood in for the missing alsa/xkbcommon
-> system headers, so `cargo check --all-targets`, `cargo fmt --check`,
-> `cargo clippy --all-targets -- -D warnings` and `cargo test --lib`
-> (84 passed) all ran green before re-sending.
-> Run-1 outcome (9 pass / 4 fail): build + all offline gates + headless PNG +
-> music sync (user y) + degraded amber band (user y) + pause/resume logged ✓;
-> 4 fails → two script bugs (tracing prints string fields QUOTED so `cache=miss`
-> greps missed; field greps like `rate=`/`song_ms=` missed on the dev machine's
-> redirected logs — script now ANSI-strips + is quote-tolerant + self-prints
-> full lines, D-38) and ONE real defect: the device default buffer is 32 ms
-> (1536 frames) so the §3.6 audible budget busted (p95 62.58 ms > 25 ms) → the
-> engine now requests a 256-frame fixed buffer with fallback (D-37, `--buffer`).
-> All offline gates pass in a build sandbox: 82 unit tests, fmt, clippy
-> -D warnings; benches: clock 6.7 ns, 512-frame mix 2.9 µs, 10 s resample 39 ms.)
-> **Current phase**: 2 — **IN PROGRESS (code complete + D-39; validation
-> run 2 pending on the dev machine)**. Next: apply the updated 2026-11-13 fix
-> drop (D-39 included — replace `src/audio/mod.rs` or apply the patch), re-run
-> `dev/validate-phase2.sh`, record results, then phase 3 (beatmap parsing,
-> §10 row 3).
+> **Last updated**: 2026-11-14 (commit-by-commit history audit) — **phase 2
+> DONE** (validation run 2 = 14/14 at `851e68b`, 2026-11-12; optional §3.6
+> spot checks closed 2026-11-13 — numbers + carried items in the appended
+> Phase-2 close-out record, mirrored in §10 row 2). **Phase 3, session 1
+> landed and pushed**: `31e6175` (.osu v14 parser — pure, wiki-verified,
+> D-40, §5.1/§7.3 fixes) → `5c61c05` (golden corpus — 7 fixtures +
+> file-level tests, §5.1) → `f62b142` (session-1 close-out: §12.1 devshell
+> note, Q-13 lean, handoff marked served). Offline gates green at `f62b142`,
+> run in the devshell on the dev machine: `cargo fmt --check`,
+> `cargo clippy --all-targets -- -D warnings`, `cargo test --lib` = 119
+> passed.
+> **Current phase**: 3 — **IN PROGRESS** (parser + golden corpus done;
+> §10 row 3). Next: commit 3 = library index per §5.2 (XDG dirs I-07,
+> `index.json` D-13, SHA-256 dedup) — open with the D-41 ruling (Q-13
+> known-hash re-import; lean: reference, user has veto). Then `.osz` zip
+> import (§5.2), the timeline visualizer, then phase-3 exit validation on
+> a real user-supplied map + audio (Q-10 rides on it).
+> 2026-11-14 audit note: this header was six commits stale (it still said
+> phase 2 "awaiting validation run 2" — §13 item 4 had lapsed since
+> `851e68b`). The same pass fixed: the Phase-2 close-out commit chain
+> (missing `1ce7cad`), the §4/§7.6 rosu-pp rows (D-40 had settled them),
+> §10 row 3 (unmarked), §12.1 devshell status, §12.3 stale bench figures.
+> Records only — no roadmap, decision, or measurement changed. The phase-2
+> delivery saga this header used to carry is preserved in D-37…D-39 and
+> the Phase-2 close-out record.
 
 ---
 
@@ -285,7 +269,7 @@ or record a dated waiver in §14.
 | Rendering | `wgpu` | Portable, instanced quads, mature. |
 | Audio output | `cpal` (**not** rodio) | We need the raw output callback — it is both our clock and our latency floor. rodio hides it. |
 | Audio decode | `symphonia` | mp3/ogg/flac/wav — the formats actually found in `.osz` zips. Decode to f32 in a worker (NOT in the RT callback; pre-decode whole file to RAM — songs are ~50 MB f32, fine). |
-| Beatmap math | `rosu-pp` | Parses `.osu` internally for PP calc. **Verify in phase 3** how much of the parsed model it exposes (hit objects, slider points, timing points); supplement with our own parser where incomplete. |
+| Beatmap math | `rosu-pp` | ~~Parses `.osu` internally for PP calc. **Verify in phase 3** how much of the parsed model it exposes; supplement with our own parser where incomplete.~~ **Verified 2026-11-13 (D-40): NOT added** — calculation-oriented `Beatmap` via file-I/O `from_path`, no raw per-object fields, no zero-I/O parse (I-09); the game's loader is our own pure `src/beatmap` parser (§5.1). Parked as a v0.2+ candidate for star-rating/PP display only. |
 | Config | `serde` + `toml` + `notify` + `parking_lot` | See §6. |
 | Archives / hashing | `zip` + `sha2` | `.osz` import, content-addressed dedup, optional banlist. |
 | Text | `cosmic-text` (or `glyphon`) | Song select, score, hints. |
@@ -634,7 +618,7 @@ scoring math (§11 I-09), never in the live game.
 | `.osr` replay recording + playback | `InputSource::Scripted` (§7.5) — record `InputEvent`s, feed them back |
 | osu! skin format support | texture atlas is already swappable; needs a skin-element spec |
 | Tablet area mapping (extend `[input]` config section) | `wl_tablet` already handled in `wayland/input.rs`; `[input]` mouse settings ship in v0.1 |
-| Difficulty + PP display in song select | `rosu-pp` already in the stack (phase 3 verification) |
+| Difficulty + PP display in song select | `rosu-pp` parked (D-40: NOT in the stack; v0.2+ candidate) |
 | In-game beatmap editor | out of scope; enormous |
 | `ruleset = "lazer"` timing option | formula-set swap only (§7.2 note) |
 
@@ -740,7 +724,7 @@ scoring math (§11 I-09), never in the live game.
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
 | **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ✅ **DONE (2026-11-12, run 2 at commit 851e68b): dev/validate-phase2.sh = 14/14.** Music sync (user y) and degraded amber band (user y). Q-8 answered: stream `rate=44100 channels=2` — the file's native rate accepted (mono source duplicated to stereo), clock counts the file's samples. §5.2 cache: miss→hit verified, entries under `~/.cache/hyprbeat/decoded/<sha256>.f32` (layout bug fixed en route: `cache_path` had written at the cache root, so the script's wipe never took effect). Pause/rebase: freeze at 1931 ms, final 4933 (expected ≈4931). D-37 live: `buffer=fixed-256`, observed callback period 1.33 ms (was 32 ms device default). §3.6: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 / p95 2.60 ms (≤ 25 ms — PASS, Q-9 estimate); tap→flash p50 13.31 / p95 35.06 ms. Benches: mix 512-frame stereo 2.15 µs (0.16 % of the 1.33 ms period); clock time_ms 1.75 ns; pause+resume 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms (one-shot, off-RT). En-route fixes: D-37/D-38 script greps, E0382 in `build_stream` (D-39), cache layout. Optional spot checks (cold start ≤ 2 s, RSS ≤ 150 MB, CPU ≤ 2 %) closed 2026-11-13 (warm-up run; numbers + caveat in close-out) |
-| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ⬜ |
+| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed; offline gates green (119 lib tests); record below. Next: library index (§5.2, opens with the D-41/Q-13 ruling) → `.osz` import → visualizer → exit validation |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
 | **6** | Sliders (§7.3), spinners, stacking, new-combo colours | A modern tech map plays correctly end-to-end | ⬜ |
@@ -783,8 +767,9 @@ The dev machine runs NixOS + Hyprland. Implications:
   Mixing rustup toolchains with nix-provided system libs is THE classic
   NixOS Rust link failure — don't do it.
 - **Devshell** (`flake.nix` — written in phase 1 as the sketch below refined
-  for the realized stack; syntax checked offline, `nix develop` still to be
-  validated on the machine):
+  for the realized stack; `nix develop` validated on the machine 2026-11-14 —
+  session-1 gates + commit ran inside it; see the minimal-contents note
+  below):
 
 ```nix
 # flake.nix (devshell sketch — validate in phase 1)
@@ -866,12 +851,17 @@ absolute XDG paths** (§5.2) and never relative to the repo. Conventions:
 - **CI (phase 3+)**: `cargo fmt --check`, `cargo clippy -- -D warnings`,
   `cargo test` (parser + rules + slider math are pure — no GPU needed).
   *Phase-1 status: all three gates already pass offline (27 tests).*
+  *Phase-3 session-1 status: green at `f62b142` — 119 lib tests, run in
+  the devshell on the dev machine.*
 - **Benchmarks** (phase 2+): criterion for clock math + slider LUT; manual
   latency measurement via `--latency-test` flag (tap-to-sound offset report).
-  *Phase-2 status: `benches/audio.rs` exists and runs (`cargo bench`):
-  clock time 6.7 ns, pause+resume cycle 8.2 ns, 512-frame stereo mix 2.9 µs
-  (≈0.03 % of the 10.7 ms callback period — I-02 headroom), 10 s stereo
-  44.1→48 kHz resample 39 ms. `--latency-test` implemented (D-33). Expect
+  *Phase-2 status (run 2 on the dev machine — final; the earlier
+  build-sandbox figures — clock 6.7 ns, pause+resume 8.2 ns, mix 2.9 µs at
+  the 10.7 ms pre-D-37 period — are superseded): `benches/audio.rs` runs
+  (`cargo bench`): clock time_ms 1.75 ns, pause+resume 5.02 ns, 512-frame
+  stereo mix 2.15 µs (0.16 % of the observed 1.33 ms callback period —
+  I-02 headroom), 10 s stereo 44.1→48 kHz resample 30.8 ms.
+  `--latency-test` implemented (D-33). Expect
   `cargo bench --bench audio` to take ~30–60 s of MEASUREMENT after ~30 s of
   compiling (criterion: 3 s warmup + 5 s measurement per bench) — it is not
   stuck; the tables print at the end. The slider LUT bench lands with phase 6.*
@@ -1022,8 +1012,9 @@ adds the new one, and updates dependent sections.
 ## Phase-2 close-out (2026-11-12) — VALIDATED 14/14
 
 Gate: `nix develop -c dev/validate-phase2.sh` → 14 passed, 0 failed.
-Commits: `22dab61` (phase 2: audio engine + run-1 fixes, D-37/D-38) → `851e68b`
-(decode cache under `decoded/` per §5.2).
+Commits: `22dab61` (phase 2: audio engine + run-1 fixes, D-37/D-38) →
+`1ce7cad` (D-39: E0382 `build_stream` ownership fix) → `851e68b` (decode
+cache under `decoded/` per §5.2). Run 2 validated the tree at `851e68b`.
 
 Fixes landed during phase-2 validation:
 
@@ -1134,6 +1125,14 @@ HEAD: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   video/.osb/skins per §5.2), then the timeline visualizer, then exit
   validation on a real user-supplied map + audio (Q-10 rides on it).
   Never invent beatmap/audio data — request the specimen early.
+- Session-1 post-audit (2026-11-14, later): a commit-by-commit pass over
+  the 12 pushed commits vs. this file found records lagging history —
+  header six commits stale (§13-4), Phase-2 close-out chain missing
+  `1ce7cad` (D-39), §4/§7.6 rosu-pp rows predating D-40 (one claimed
+  "already in the stack" — it never was), §10 row 3 unmarked, §12.1
+  devshell "to be validated" though it ran the session-1 gates, §12.3
+  carrying pre-D-37 bench figures contradicting the run-2 close-out.
+  Fixed in the audit commit; records only, nothing else moved.
 
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
 Check §10, do the next unfinished phase (phase 3), keep the invariants,
