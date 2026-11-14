@@ -815,6 +815,13 @@ The dev machine runs NixOS + Hyprland. Implications:
 }
 ```
 
+- Devshell contents are minimal: the Rust toolchain + stdenv basics
+  (bash, coreutils, sed, tar, git) — and no python3 (phase-3 session 1: a
+  fixture generator assumed it and died with command not found). Anything
+  pasted INTO the devshell must be pure bash (heredoc + sed/printf); borrow
+  one-off tools with `nix shell nixpkgs#python3` rather than widening the
+  flake.
+
 - **Runtime audio**: cpal opens ALSA devices; on a standard NixOS desktop,
   PipeWire's ALSA compatibility layer satisfies this (standard Hyprland
   setups already enable it). If stream-open fails: check
@@ -997,6 +1004,13 @@ adds the new one, and updates dependent sections.
   (`.with_ansi(std::io::stderr().is_terminal())` in main.rs) stays listed
   here as a ready hardening — land it before ever trusting raw redirected
   logs for a gate again.
+- **Q-13 (new, 2026-11-14, phase 3)**: known-hash re-import behaviour for
+  the library index (commit 3): when an incoming file's SHA-256 is already
+  in `index.json`, record a reference to the existing extraction, or
+  re-extract from the new `.osz`? Lean: reference — §5.2 content addressing
+  plus the D-32 hash-addressed decode cache already store identical bytes
+  once; re-extraction is wasted I/O. To be ruled as D-41 with the
+  library-index commit; the user has veto.
 
 ---
 
@@ -1055,7 +1069,7 @@ Fixes landed during phase-2 validation:
 - [ ] Q-9: microphone loopback to replace the mixed+period audible estimate
 - [ ] tap→flash p95 ≈ 34–35 ms — frame pacing, if a photon budget is set
 
-### Handoff notes for the next session
+### Handoff notes — written for phase-3 session 1 (2026-11-14; served)
 
 - Repo lives on the user's machine (`~/hyprbeat`, Nix flake devshell). The
   assistant has NO filesystem access to it: request command runs and pasted
@@ -1067,6 +1081,59 @@ Fixes landed during phase-2 validation:
 - Commit style: lowercase prefix + D-/§- refs, e.g. `docs(context): …`.
 - Read this file top-to-bottom before planning; the roadmap above decides
   what phase 3 contains.
+
+---
+
+<!-- ---------------------------------------------------------------- -->
+<!-- Phase-3 progress record (appended 2026-11-14, session 1). -->
+
+## Phase-3 session 1 (2026-11-14) — parser + golden corpus landed
+
+Commits (both pushed): `31e6175` (feat(beatmap): .osu v14 parser) →
+`5c61c05` (feat(beatmap): golden .osu corpus). Offline gates green at
+HEAD: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --lib` = 119 passed.
+
+- Parser (`src/beatmap/mod.rs`, pure/zero-I/O): section grammar, BOM +
+  CRLF + comment tolerance, hit-object type bitmask (circles/sliders/
+  spinners; mania-hold rejected per D-12), combo-colour skip = type bits
+  4–6, raw slider anchors for all curve types (phase 6 / §7.3 consumes
+  them; P-with->3-points kept raw + Perfect), inherited points with
+  `sv_multiplier = -100/beat_length`, kiai = effects bit 0, omit-bar-line
+  = bit 3, lenient empty timing fields (empty meter defaults to 4),
+  pre-v8 AR→OD fallback, physical line numbers in parse errors.
+- Golden corpus (`assets/golden/` + `src/beatmap/golden.rs`): 7 fixtures —
+  v14-standard (flagship; doubles as the timeline-visualizer fixture),
+  v14-lazer (v128 header kept), v6-legacy, bom-crlf-comments,
+  curves-and-edges, unsubmitted (negative ids), invalid-line (parse must
+  fail at line 22). Fixtures written by a pure-bash generator (LF heredoc
+  + `sed 's/$/\r/'` + printf BOM) because the devshell has no python3 —
+  byte-exactness proven by in-paste `sha256sum -c` gates.
+
+### Handoff notes for the next session (phase 3, commit 3 onward)
+
+- Repo: `github.com/schmoetyyy/hyprbeat` (public), branch `main`; dev tree
+  `~/hyprbeat` on the user's NixOS machine. The assistant has NO write
+  access to the dev tree: every edit ships as a paste of exact terminal
+  commands (bash heredocs / `git apply` patches) or a zip of changed
+  files, and a change is only "applied" after the user pastes back the
+  gates output. The assistant MAY clone the public repo read-only to
+  verify patches and read source before proposing edits — never guess
+  file contents or line numbers.
+- Working rules (in force): always answer in English; one change at a
+  time, small commits in the established style (lowercase prefix + §/D/Q
+  refs); every edit paste includes the offline gates (`cargo fmt --check
+  && cargo clippy --all-targets -- -D warnings && cargo test --lib`);
+  `cargo bench --bench audio` (~40 s) and the phase-2 validation script
+  only when audio code is touched.
+- Next change (commit 3): library index per §5.2 — XDG dirs via the
+  `directories` crate (I-07), `index.json` (D-13), SHA-256 dedup. Open the
+  D-41 ruling first (Q-13: known-hash re-import — record a reference vs
+  re-extract; lean: reference).
+- After commit 3: `.osz` zip import (keep audio/.osu/bg image; skip
+  video/.osb/skins per §5.2), then the timeline visualizer, then exit
+  validation on a real user-supplied map + audio (Q-10 rides on it).
+  Never invent beatmap/audio data — request the specimen early.
 
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
 Check §10, do the next unfinished phase (phase 3), keep the invariants,
