@@ -1,0 +1,30 @@
+﻿osu file format v14
+// a comment before any section must be skipped
+
+[General]
+AudioFilename: golden-messy.mp3
+// interleaved junk
+AudioLeadIn: 0
+
+StackLeniency: 0.7
+Mode: 0
+[Metadata]
+Title: Golden Messy
+Artist: hyprbeat
+Creator: hyprbeat
+Version: Messy
+[Difficulty]
+HPDrainRate: 5
+CircleSize: 4
+OverallDifficulty: 8
+ApproachRate: 9.5
+SliderMultiplier: 1.4
+SliderTickRate: 2
+[TimingPoints]
+0,400,4,0,0,80,1,0
+[HitObjects]
+// comment between objects
+256,192,500,1,0
+
+256,192,900,1,0
+// trailing junk

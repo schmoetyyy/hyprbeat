@@ -1,0 +1,22 @@
+﻿osu file format v14
+
+[General]
+AudioFilename: golden-invalid.mp3
+// a comment that must still count as a line
+
+Mode: 0
+
+[Difficulty]
+HPDrainRate: 5
+CircleSize: 4
+OverallDifficulty: 6
+SliderMultiplier: 1.5
+SliderTickRate: 2
+
+[TimingPoints]
+0,500,4,0,0,80,1,0
+
+[HitObjects]
+256,192,1000,1,0
+// another counting comment
+256,192,1200,not-an-object

@@ -381,9 +381,15 @@ Text format, `[Section]` headers, `key: value` / `key,value,...` lines.
   - Coordinates 0–512 × 0–384.
 - Numbers may be `int` or `float` depending on field; parse leniently, store f32.
 
-**Golden-file tests**: commit 5–10 tiny synthetic `.osu` fixtures (CC audio
-placeholders, no copyrighted metadata) covering circles, all curve types,
-repeats, inherited points, kiai. Parser must be unit-testable with zero I/O.
+**Golden-file tests** (phase-3 commit 2): seven synthetic `.osu` fixtures
+live under `assets/golden/` — invented metadata only (I-03; audio
+filenames are placeholders, nothing playable) — covering circles, all curve
+types, repeats, inherited points, kiai, legacy fallbacks (no ApproachRate,
+missing ids, 7-field timing) and byte-level traps (BOM/CRLF/comments, one
+known-bad line). File-level tests live in `src/beatmap/golden.rs` —
+test-only I/O; the parser itself stays zero-I/O (I-09). Real-world
+hardening runs at the phase-3 exit validation with user-supplied maps,
+not against this corpus.
 
 ### 5.2 Library layout on disk (XDG)
 

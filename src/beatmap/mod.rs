@@ -640,6 +640,11 @@ fn parse_slider(line_no: usize, line: &str, parts: &[&str]) -> Result<Slider, Pa
     })
 }
 
+/// File-level tests over the committed golden corpus (`assets/golden/`);
+/// reading files is test-only I/O — the parser stays pure (I-09).
+#[cfg(test)]
+mod golden;
+
 #[cfg(test)]
 mod tests {
     use super::*;

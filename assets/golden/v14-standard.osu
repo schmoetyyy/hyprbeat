@@ -1,0 +1,66 @@
+osu file format v14
+
+[General]
+AudioFilename: golden-standard.mp3
+AudioLeadIn: 800
+PreviewTime: 1000
+SampleSet: Normal
+LetterboxInBreaks: 1
+StackLeniency: 0.7
+Mode: 0
+
+[Editor]
+DistanceSpacing: 1.8
+BeatDivisor: 4
+GridSize: 4
+
+[Metadata]
+Title: Golden Standard
+TitleUnicode: Gölden Standard
+Artist: hyprbeat
+ArtistUnicode: hyprbëat
+Creator: hyprbeat
+Version: Standard
+Source: hyprbeat-corpus
+Tags: golden fixture corpus hyprbeat
+BeatmapID: 4242
+BeatmapSetID: 742
+
+[Difficulty]
+HPDrainRate: 6
+CircleSize: 4
+OverallDifficulty: 7.5
+ApproachRate: 9.2
+SliderMultiplier: 1.9
+SliderTickRate: 2
+
+[Events]
+//Background and Video events
+0,0,golden-bg.jpg,0,0
+Video,0,golden-video.mp4
+//Break periods
+2,12000,13500
+
+[TimingPoints]
+0,375,4,2,0,60,1,0
+1000,-100,4,2,0,60,0,0
+4000,-50,4,2,0,60,0,1
+8000,375,4,2,0,70,1,8
+12000,-125,4,2,0,70,0,9
+
+[Colours]
+Combo1: 255,128,64
+Combo2: 64,192,255
+Combo3: 32,32,48
+
+[HitObjects]
+256,192,0,5,0,0:0:0:0:
+256,192,750,1,2
+100,150,1500,6,0,L|400:150|400:300,1,200
+300,200,2250,2,0,B|350:200|350:200|400:300,2,180.5,2|2,0:0|0:2
+400,300,3000,12,4,4200,3:0:0:70:
+50,100,4500,5,8,0:0:0:0:
+150,200,5000,2,0,P|300:200|400:150,1,180
+0,300,5750,2,0,C|100:300|200:250|300:300,1,250
+320,240,6250,21,0
+256,192,7000,8,0,8500

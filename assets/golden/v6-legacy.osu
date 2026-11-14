@@ -1,0 +1,31 @@
+osu file format v6
+
+[General]
+AudioFilename: golden-legacy.mp3
+AudioLeadIn: 1200
+StackLeniency: 0.2
+
+[Metadata]
+Title: Golden Legacy
+Artist: hyprbeat
+Creator: hyprbeat
+Version: Legacy
+
+[Difficulty]
+HPDrainRate: 4
+CircleSize: 5
+OverallDifficulty: 6
+SliderMultiplier: 1.2
+SliderTickRate: 1
+
+[Events]
+0,0,golden-legacy-bg.jpg,0,0
+
+[TimingPoints]
+0,600,4,0,0,70,1
+1200,300,4,0,0,70,1
+
+[HitObjects]
+256,192,2000,5,0
+256,192,2900,1,0
+120,120,3800,2,0,L|400:120,1,280

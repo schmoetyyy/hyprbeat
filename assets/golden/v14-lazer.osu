@@ -1,0 +1,32 @@
+osu file format v128
+
+[General]
+AudioFilename: golden-lazer.mp3
+AudioLeadIn: 0
+StackLeniency: 0.7
+Mode: 0
+WidescreenStoryboard: 1
+
+[Metadata]
+Title: Golden Lazer
+TitleUnicode: Golden Lazer
+Artist: hyprbeat
+ArtistUnicode: hyprbeat
+Creator: hyprbeat
+Version: Lazer
+BeatmapID: 4243
+BeatmapSetID: 742
+
+[Difficulty]
+HPDrainRate: 5
+CircleSize: 3.5
+OverallDifficulty: 6
+ApproachRate: 10
+SliderMultiplier: 1.6
+SliderTickRate: 2
+
+[TimingPoints]
+0,500,4,0,0,90,1,0
+
+[HitObjects]
+256,192,1000,1,0
