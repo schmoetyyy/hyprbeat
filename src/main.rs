@@ -30,7 +30,16 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let result = if args.headless {
+    let result = if let Some(osz_path) = &args.import {
+        // --import (§5.2, phase 3): pure library operation — no render, no
+        // audio device. Skips are reported, not failures (D-43/D-44); a
+        // broken archive exits FAILURE without having written anything.
+        // ImportError joins the crate's boxed Error here (its Display and
+        // source() chain are what the error path prints).
+        hyprbeat::beatmap::import::run_cli(osz_path, args.library_root.as_deref())
+            .map(|_| ())
+            .map_err(|e| Box::new(e) as hyprbeat::Error)
+    } else if args.headless {
         hyprbeat::render::headless::render_png(&args).map(|_| ())
     } else {
         hyprbeat::wayland::run(args)

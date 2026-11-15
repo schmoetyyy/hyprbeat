@@ -1,11 +1,14 @@
-//! `.osz` zip import (§5.2, D-43/D-44) — the library-side driver.
+//! `.osz` zip import (§5.2, D-43/D-44) — the library-side driver + the
+//! `--import` CLI wrapper.
 //!
 //! [`super::osz`] owns the index and the content store; this module turns
 //! one `.osz` archive into a batch of [`LibraryIndex::store_file`] calls
 //! bracketed by one [`LibraryIndex::load`] and one [`LibraryIndex::save`].
-//! Pure library code: no CLI parsing, no XDG access of its own — the
-//! caller supplies the [`LibraryPaths`] (tests use temp roots, I-09). The
-//! CLI wrapper lands in the next commit.
+//! The core ([`import_osz`]) stays pure library code — no CLI parsing, no
+//! XDG access of its own; the caller supplies the [`LibraryPaths`] (tests
+//! use temp roots, I-09). [`run_cli`] is the thin `--import` wrapper
+//! around it: root resolution (`--library-root` or the XDG default, I-07),
+//! file open, and the D-38 log contract.
 //!
 //! Routing (D-43):
 //! - **Filter**: only `*.osu`, audio (`.mp3 .ogg .flac .wav`) and images
@@ -45,13 +48,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
 use std::io::Seek;
+use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
 
-#[cfg(test)]
-use super::osz::paths_from;
 use super::osz::{
-    Imported, LibraryError, LibraryIndex, LibraryPaths, sanitize_rel_path, sha256_hex,
+    Imported, LibraryError, LibraryIndex, LibraryPaths, default_paths, paths_from,
+    sanitize_rel_path, sha256_hex,
 };
 
 /// Extraction allowlist (D-43): the §5.2 layout holds `.osu` files, audio
@@ -141,6 +144,14 @@ pub enum ImportError {
     OversizeTotal { total: u64, cap: u64 },
     /// The archive holds more entries than [`ImportLimits::max_entries`].
     TooManyEntries { count: usize, cap: usize },
+    /// The `.osz` file itself could not be opened (missing, unreadable).
+    Open {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// No `--library-root` and the environment resolves no XDG data dir
+    /// (no HOME / XDG_DATA_HOME) — nowhere to put the library.
+    NoDataDir,
 }
 
 impl fmt::Display for ImportError {
@@ -173,6 +184,13 @@ impl fmt::Display for ImportError {
             Self::TooManyEntries { count, cap } => {
                 write!(f, "archive holds {count} entries (cap {cap})")
             }
+            Self::Open { path, source } => {
+                write!(f, "cannot open .osz at {}: {source}", path.display())
+            }
+            Self::NoDataDir => write!(
+                f,
+                "no XDG data dir resolves for the library (HOME/XDG_DATA_HOME unset?) — pass --library-root DIR"
+            ),
         }
     }
 }
@@ -183,6 +201,7 @@ impl std::error::Error for ImportError {
             Self::Library(e) => Some(e),
             Self::Zip(e) => Some(e),
             Self::Io(e) => Some(e),
+            Self::Open { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -465,6 +484,68 @@ pub fn import_osz<R: Read + Seek>(
         replaced,
         index_saved,
     })
+}
+
+/// CLI wrapper behind `--import PATH` (commit 5, §5.2): resolve the
+/// library root (`--library-root DIR` overrides the XDG default, I-07),
+/// open the `.osz` file, drive [`import_osz`] with the default
+/// [`ImportLimits`] (the D-44 caps), and log the report on the D-38 field
+/// contract — string fields via the `%` Display sigil so they print bare,
+/// numbers bare by default — so `dev/validate-phase3-import.sh` can grep
+/// one summary line:
+/// `osz import complete set=… stored=… deduped=… repaired=… replaced=…
+/// skipped=… index_saved=…`.
+///
+/// Skips are logged and reported, never fatal (D-43/D-44); the exit code
+/// is the caller's: `Ok` (even with skips) vs [`ImportError`].
+pub fn run_cli(osz_path: &Path, library_root: Option<&Path>) -> Result<ImportReport, ImportError> {
+    let paths = match library_root {
+        Some(root) => paths_from(root),
+        None => default_paths().ok_or(ImportError::NoDataDir)?,
+    };
+    let file = std::fs::File::open(osz_path).map_err(|source| ImportError::Open {
+        path: osz_path.to_path_buf(),
+        source,
+    })?;
+    let report = import_osz(file, &paths, &ImportLimits::default())?;
+    log_report(&report);
+    Ok(report)
+}
+
+/// Emit the import report on the D-38 log contract: one info line per
+/// skipped entry (the D-43/D-44 "skips are reported, never silent"), one
+/// warn line per repair or D-42 displacement (state the library healed),
+/// and one grep-able summary line for the validation script.
+fn log_report(report: &ImportReport) {
+    let set = match &report.mode {
+        ImportMode::Submitted { set_id } => set_id.to_string(),
+        ImportMode::Unsubmitted { hash8 } => format!("unsubmitted/{hash8}"),
+    };
+    for s in &report.skipped {
+        tracing::info!(name = %s.name, reason = %s.reason, "osz import: skipped entry");
+    }
+    for f in &report.files {
+        if f.repaired {
+            tracing::warn!(path = %f.path, "osz import: dangling entry repaired (D-41)");
+        }
+        if let Some(displaced) = &f.replaced {
+            tracing::warn!(
+                path = %f.path,
+                displaced = %displaced,
+                "osz import: stale entry replaced (D-42)"
+            );
+        }
+    }
+    tracing::info!(
+        set = %set,
+        stored = report.stored,
+        deduped = report.deduped,
+        repaired = report.repaired,
+        replaced = report.replaced,
+        skipped = report.skipped.len(),
+        index_saved = report.index_saved,
+        "osz import complete"
+    );
 }
 
 /// Read one entry's bytes with the per-entry cap enforced on BOTH the
@@ -1035,6 +1116,52 @@ mod tests {
         assert!(index.lookup(&old_hash).is_none(), "stale entry survived");
         assert_eq!(index.lookup(&new_hash).unwrap().path, "100/map.osu");
         assert_eq!(fs::read(paths.songs_dir.join("100/map.osu")).unwrap(), v2);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- run_cli (commit 5): file + library-root glue around import_osz --
+
+    #[test]
+    fn run_cli_imports_file_into_explicit_root() {
+        let base = tmpdir("run-cli-happy");
+        let root = base.join("lib");
+        let osz_path = base.join("set.osz");
+        let bytes = zip_bytes(&[
+            ("audio.mp3", b"run-cli-audio"),
+            ("A - B (c) [Easy].osu", &osu("20261115", "Easy")),
+        ]);
+        fs::write(&osz_path, bytes).unwrap();
+
+        let report = run_cli(&osz_path, Some(&root)).unwrap();
+        assert_eq!(report.stored, 2);
+        assert!(report.index_saved);
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.mode, ImportMode::Submitted { set_id: 20261115 });
+        assert!(root.join("songs/20261115/audio.mp3").is_file());
+        assert!(root.join("songs/20261115/A - B (c) [Easy].osu").is_file());
+        assert!(root.join("index.json").is_file());
+
+        // Re-import through the same wrapper: pure D-41 dedup, index
+        // byte-identical (saved only when mutated).
+        let before = fs::read_to_string(root.join("index.json")).unwrap();
+        let again = run_cli(&osz_path, Some(&root)).unwrap();
+        assert_eq!(again.stored, 0);
+        assert_eq!(again.deduped, 2);
+        assert!(!again.index_saved);
+        let after = fs::read_to_string(root.join("index.json")).unwrap();
+        assert_eq!(before, after);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn run_cli_missing_file_is_a_typed_error() {
+        let base = tmpdir("run-cli-open");
+        let err = run_cli(&base.join("nope.osz"), Some(&base)).unwrap_err();
+        assert!(matches!(err, ImportError::Open { .. }), "got {err:?}");
+        assert!(err.to_string().contains("cannot open .osz"));
+        // nothing was created — fail-before-write posture extends to the
+        // wrapper: the root does not even gain songs/ or index.json
+        assert!(!base.join("index.json").exists());
         fs::remove_dir_all(&base).unwrap();
     }
 }

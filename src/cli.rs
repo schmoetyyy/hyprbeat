@@ -3,7 +3,8 @@
 //! Deliberately a tiny hand-rolled parser: every phase-1 flag is a dev or
 //! diagnostic flag, and `clap` is scheduled to arrive in phase 5 together
 //! with the config-file overrides (§6). Keeping the dependency tree small
-//! is a project value (§4).
+//! is a project value (§4). Phase 3 adds the first user-facing operation,
+//! `--import` + `--library-root` (§5.2) — still clap-free per D-20.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,13 +22,23 @@ compatible with the osu! beatmap format. Built for Hyprland/Wayland.
 
 Phase 2 preview: ambient gradient wallpaper, frame-callback render loop,
 fractional-scale-correct rendering, audio-clock-driven animation (cpal +
-symphonia). Maps, judgement and the config file arrive in phases 3–8
-(see CONTEXT.md §10).
+symphonia). Beatmap library import (.osz, phase 3) via --import; judgement
+and the config file arrive in phases 4–8 (see CONTEXT.md §10).
 
 USAGE:
     hyprbeat [OPTIONS]
 
-OPTIONS (phase-2 dev/diagnostic set; clap + config flags land in phase 5):
+OPTIONS (phase-3 dev/diagnostic + import set; clap + config flags land in
+phase 5):
+        --import PATH       Import one .osz beatmap archive into the library
+                            (§5.2: allowlist filter, set-id routing, hash
+                            dedup) and exit — no render, no audio device.
+                            Skips (video, .osb, skins, unknown extensions)
+                            are reported, not fatal; broken or hostile
+                            archives fail BEFORE any write (D-44)
+        --library-root DIR  Library root for --import, overriding the XDG
+                            default ($XDG_DATA_HOME/hyprbeat). DIR gains
+                            songs/ and index.json; created on demand
         --headless          Render one frame offscreen to a PNG and exit
                             (no compositor required; needs a Vulkan or GLES
                             driver — lavapipe/swrast works)
@@ -70,6 +81,8 @@ OPTIONS (phase-2 dev/diagnostic set; clap + config flags land in phase 5):
     -h, --help              Print help
 
 EXAMPLES:
+    hyprbeat --import map.osz                           # import into the XDG library
+    hyprbeat --import map.osz --library-root /tmp/lib   # import into a scratch library
     hyprbeat --testcard --timeout 10                     # watch the background
     hyprbeat --headless --scale 1.25 --testcard --out /tmp/card.png
     hyprbeat --audio assets/test-tone.wav --timeout 20   # music-synced animation
@@ -103,6 +116,12 @@ pub struct Args {
     pub out: Option<PathBuf>,
     /// Music file to load and sync to (`--audio`, phase 2).
     pub audio: Option<PathBuf>,
+    /// One `.osz` to import into the library, then exit (§5.2, phase 3).
+    /// Pure library operation: no render, no audio device.
+    pub import: Option<PathBuf>,
+    /// Library root override for `--import` (default: the XDG data dir,
+    /// I-07). The dir gains `songs/` + `index.json`.
+    pub library_root: Option<PathBuf>,
     /// Force the degraded wall clock even with a working device (D-16 test).
     pub no_audio: bool,
     /// Master volume 0..1 (§6 `[general] volume` — CLI stand-in until phase 5).
@@ -140,6 +159,8 @@ where
     let mut scale = 1.0f64;
     let mut out: Option<PathBuf> = None;
     let mut audio: Option<PathBuf> = None;
+    let mut import: Option<PathBuf> = None;
+    let mut library_root: Option<PathBuf> = None;
     let mut no_audio = false;
     let mut volume = crate::audio::DEFAULT_VOLUME;
     let mut offset_ms = 0.0f64;
@@ -162,6 +183,15 @@ where
                 audio = Some(PathBuf::from(raw));
             }
             "--no-audio" => no_audio = true,
+            "--import" => {
+                let raw = parse_value(&mut it, "--import", |s| Ok::<_, String>(s.to_owned()))?;
+                import = Some(PathBuf::from(raw));
+            }
+            "--library-root" => {
+                let raw =
+                    parse_value(&mut it, "--library-root", |s| Ok::<_, String>(s.to_owned()))?;
+                library_root = Some(PathBuf::from(raw));
+            }
             "--volume" => {
                 volume = parse_value(&mut it, "--volume", parse_volume)?;
             }
@@ -204,6 +234,16 @@ where
     if headless && (audio.is_some() || latency_test || no_audio) {
         return Err("--headless renders a still frame; --audio/--latency-test/--no-audio are live-mode flags".to_owned());
     }
+    // --import (phase 3) is a pure library operation: it neither renders
+    // nor opens an audio device, so the render/audio mode flags are
+    // meaningless alongside it. Inert knobs (--fps, --size, --timeout, …)
+    // stay legal and are simply ignored.
+    if import.is_some() && (headless || probe || latency_test || audio.is_some() || no_audio) {
+        return Err("--import is a pure library operation; --headless/--probe/--latency-test/--audio/--no-audio are render/audio-mode flags".to_owned());
+    }
+    if library_root.is_some() && import.is_none() {
+        return Err("--library-root is only meaningful with --import (song select grows its own library flag in phase 8)".to_owned());
+    }
 
     // --timeout: explicit value wins (0 disables); otherwise a mode-dependent
     // safety default (D-24).
@@ -236,6 +276,8 @@ where
         scale,
         out,
         audio,
+        import,
+        library_root,
         no_audio,
         volume,
         offset_ms,
@@ -383,6 +425,30 @@ mod tests {
         assert_eq!(a.audio, Some(PathBuf::from("/tmp/song.mp3")));
         assert!((a.volume - 0.25).abs() < 1e-6);
         assert_eq!(a.offset_ms, -12.5);
+    }
+
+    #[test]
+    fn import_flags_parse_and_conflict() {
+        let a = args(&["--import", "/tmp/map.osz"]).unwrap();
+        assert_eq!(a.import, Some(PathBuf::from("/tmp/map.osz")));
+        assert_eq!(a.library_root, None);
+        let a = args(&["--import", "m.osz", "--library-root", "/tmp/lib"]).unwrap();
+        assert_eq!(a.import, Some(PathBuf::from("m.osz")));
+        assert_eq!(a.library_root, Some(PathBuf::from("/tmp/lib")));
+        // --library-root without --import has nothing to root (phase 8
+        // grows the song-select library flag)
+        assert!(args(&["--library-root", "/tmp/lib"]).is_err());
+        // import is a pure library op — render/audio mode flags conflict
+        assert!(args(&["--import", "m.osz", "--headless"]).is_err());
+        assert!(args(&["--import", "m.osz", "--probe"]).is_err());
+        assert!(args(&["--import", "m.osz", "--latency-test"]).is_err());
+        assert!(args(&["--import", "m.osz", "--audio", "x.mp3"]).is_err());
+        assert!(args(&["--import", "m.osz", "--no-audio"]).is_err());
+        // missing values
+        assert!(args(&["--import"]).is_err());
+        assert!(args(&["--library-root"]).is_err());
+        // inert render knobs alongside --import are harmless (ignored)
+        assert!(args(&["--import", "m.osz", "--fps", "60"]).is_ok());
     }
 
     #[test]

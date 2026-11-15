@@ -5,10 +5,11 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-15 (phase 3, session 2: D-41 ruling + library
-> index + `.osz` import library; record corrected — the `rust-version`
-> bump and the 10 clippy fixes landed in the preceding refactor commit,
-> not in commit 4) — **phase 2 DONE** (validation run 2 =
+> **Last updated**: 2026-11-15 (phase 3, session 3: import CLI
+> (`--import`/`--library-root`) + `dev/validate-phase3-import.sh` + D-45
+> user-ruled ACCEPT ahead of the visualizer; session-2 correction stands: the
+> `rust-version` bump and the 10 clippy fixes landed in the preceding
+> refactor commit, not in commit 4) — **phase 2 DONE** (validation run 2 =
 > 14/14 at `851e68b`, 2026-11-12; optional §3.6 spot checks closed
 > 2026-11-13 — numbers + carried items in the appended Phase-2 close-out
 > record, mirrored in §10 row 2). **Session 1 landed and pushed**:
@@ -27,15 +28,21 @@
 > audio/wayland code, fixed as 8 behavior-preserving rewrites
 > (`as_chunks`, let-chains); applied on the dev machine — gates green
 > (fmt, clippy `-D warnings`, 128 tests) + Wayland smoke pass. Commit 4
-> (this commit) = the `.osz` zip import library: `src/beatmap/import.rs`
-> + the D-42 replace-on-update guard in `osz.rs`; `zip 9.6` added
-> default-features-off. The CLI wrapper is deliberately split to
-> commit 5.
+> `f4d1cb7` (applied AND pushed; dev-machine gates green, 143 tests) =
+> the `.osz` zip import library: `src/beatmap/import.rs` + the D-42
+> replace-on-update guard in `osz.rs`; `zip 9.6` added
+> default-features-off. **Session 3**: commit 5 (this commit) = the
+> import CLI: `--import PATH` / `--library-root DIR` (`cli.rs` +
+> `main.rs` dispatch + `run_cli` in `import.rs`) +
+> `dev/validate-phase3-import.sh` with committed synthetic fixtures
+> (`dev/fixtures/`, generator committed for provenance — user-OK'd at
+> the plan review); D-45 user-ruled ACCEPT (per-set manifest, index
+> v2 — §9).
 > **Current phase**: 3 — **IN PROGRESS** (parser + corpus + library index +
-> `.osz` import library done; §10 row 3). Next: commit 5 = import CLI
-> dispatch + the validation script on a real user-supplied `.osz` specimen
-> (Q-10 rides on it), then the timeline visualizer, then phase-3 exit
-> validation.
+> `.osz` import library + import CLI done; §10 row 3). Next: the timeline
+> visualizer (it carries the D-45 index-v2 loader), a real user-supplied
+> `.osz` specimen through `dev/validate-phase3-import.sh` (Q-10 rides on
+> it), then phase-3 exit validation.
 > 2026-11-14 audit note: this header was six commits stale (it still said
 > phase 2 "awaiting validation run 2" — §13 item 4 had lapsed since
 > `851e68b`). The same pass fixed: the Phase-2 close-out commit chain
@@ -348,8 +355,10 @@ src/
 │   ├── osu.rs            .osu text parser (v14; see §5.1)
 │   ├── osz.rs            library index + content store (D-13/D-41/D-42)
 │   ├── import.rs         .osz zip import: allowlist filter, set-id
-│                         routing, unsubmitted hash8 dirs, caps
-│                         (D-43/D-44; CLI wrapper lands in the next commit)
+│                         routing, unsubmitted hash8 dirs, caps +
+│                         the --import CLI wrapper (run_cli)
+│                         (D-43/D-44; D-45 sets-manifest lands with the
+│                         visualizer's loader)
 │   ├── model.rs          Beatmap, HitObject, TimingPoint, Difficulty attrs
 │   └── slider.rs         path math: Catmull-Rom / perfect arcs / linear,
 │                         equidistant arc-length reparam, slider ticks
@@ -416,7 +425,8 @@ not against this corpus.
 ~/.config/hyprbeat/config.toml
 ~/.local/share/hyprbeat/
     songs/<set-id>/{audio.mp3, *.osu, bg.jpg}     # extracted from .osz
-    index.sqlite (or .json in v0.1)               # sha256 → metadata cache
+    index.json (D-13 v1)                           # sha256 → {path, size};
+                                                   # D-45 adds sets in v2
 ~/.cache/hyprbeat/
     decoded/<sha256>.f32                          # audio decode cache
 ```
@@ -424,6 +434,11 @@ not against this corpus.
 Import flow: pick `.osz` → hash → dedupe (skip if seen) → extract → index →
 available in song select. **Content-addressed by SHA-256 of each file** — same
 audio across maps is stored once (mirrors lazer's hash-based storage).
+CLI realization (phase 3, commit 5): `hyprbeat --import <file.osz>`,
+optionally `--library-root DIR` to override the XDG default — skips are
+reported (not fatal), hostile archives fail BEFORE any write (D-44). How a
+later loader finds a set's files after a cross-set dedup = **D-45** (a
+per-set manifest, index v2 — the v1 index cannot answer it).
 
 ### 5.3 Default assets & first-run behaviour
 
@@ -728,7 +743,7 @@ scoring math (§11 I-09), never in the live game.
 | D-17 | Output scale follows the compositor; user config exposes only `ui_scale` and a perf-only `[render] scale` override (clamped) | Wayland-correct: client-side "DPI" settings fight the compositor → blur / mis-sized rendering. |
 | D-18 | Mouse speed = software sensitivity multiplier on pointer deltas (NOT a DPI setting); hardware DPI is the user's mouse config. Default `raw_input = true` bypasses compositor acceleration for predictable aim. Sensitivity applies only in PLAYING, never in wallpaper passthrough. | Wayland clients cannot set mouse DPI (that's hardware/libinput). What rhythm players want — "1 pad unit = N osu!px" — is a sensitivity multiplier; raw input removes inter-compositor aim inconsistency. |
 | D-19 | Product name is `hyprbeat` (was working title "beatpaper"). Settled pre-code while the rename is free. | Satisfies D-09/I-04 (no "osu"). Aware of namespace overlap with Hyprland's `hyprpaper` (Vaxry's wallpaper daemon — different function: rhythm game vs static wallpaper); accepted the association as net-positive ecosystem fit. Do not re-litigate without a concrete conflict (trademark claim or documented user confusion). |
-| D-20 | Phase-1 CLI is a minimal hand-rolled parser (`--headless --timeout --size --scale --out --testcard --probe --fps`); clap still lands in phase 5 with the config flags (§6) | §4 "keep the dependency tree small"; every phase-1 flag is a dev/diagnostic flag |
+| D-20 | Phase-1 CLI is a minimal hand-rolled parser (`--headless --timeout --size --scale --out --testcard --probe --fps`); clap still lands in phase 5 with the config flags (§6). Phase 3 extended it with `--import PATH` / `--library-root DIR` (§5.2) — still clap-free | §4 "keep the dependency tree small"; every phase-1 flag is a dev/diagnostic flag |
 | D-21 | Live rendering = one wgpu surface per output created over raw Wayland handles; fractional scale = buffer `round(logical×scale)` mapped 1:1 onto logical size via `wp_viewporter` source/dest; without viewporter, fall back to `wl_surface.set_buffer_scale(round(scale))` + warn. The wgpu 30 instance is handed the `wl_display` (`InstanceDescriptor::display`) so the GLES backend can present on Wayland. | Pixel-correct fractional scaling (D-17/I-11); wgpu-30-specific requirement discovered during the phase-1 build |
 | D-22 | Wallpaper surfaces default to an EMPTY input region + `keyboard_interactivity=none` (pointer passthrough, I-13); `--probe` temporarily maps full input + `on_demand` to measure Q-1/Q-2 from the live desktop | Phase 1 must never eat desktop input; the probe doubles as the §14 instrument |
 | D-23 | Frame loop: render only inside frame callbacks; idle cap by skipping with an EMPTY commit (some compositors only fire callbacks after a commit); a 250 ms watchdog re-requests callbacks (occlusion ⇒ callbacks stop ⇒ ~0 % CPU is expected and logged once) | §3.5 made concrete + self-healing; whether the empty commits are actually needed on Hyprland is Q-3 |
@@ -753,6 +768,7 @@ scoring math (§11 I-09), never in the live game.
 | D-42 | **Map-update re-import = explicit REPLACE.** When hash-UNKNOWN bytes are stored at a target path another entry still claims (same set-id + entry name, different bytes), that entry is displaced BEFORE the write: its index entry removed, the new bytes written over the file, the new hash inserted at that path (`Imported::replaced` reports the displaced hash). Known hashes NEVER displace (D-41 reference wins, nothing written); the dangling-repair branch carries the same guard. Documented crash window: bytes hit disk before the batched index save (osz.rs ordering guarantee), so a crash mid-import can leave a stale claim until the next import of that hash — load verifies existence, not bytes; a byte-verify pass is parked as §14 Q-15. Mandated tests: unit in osz.rs (replace, dedup-no-displace, repair-displaces) + end-to-end in import.rs. | Overwriting while the old entry claims the path makes the index lie (old hash → new bytes). Refusing breaks the re-import-the-updated-.osz story; hash-suffixed names break the `songs/<set-id>/<name>` layout. User-ruled 2026-11-15. |
 | D-43 | **`.osz` routing (import library commit)**: keep = `*.osu` + audio (`.mp3 .ogg .flac .wav` — mirrors the symphonia features) + images (`.jpg .jpeg .png`); everything else (video, `.osb`, skins, unknown) is skipped and reported. One `.osz` = one set: the set id comes from the kept `.osu` files' `[Metadata] BeatmapSetID` via a lenient metadata-only scan — NOT `parse_osu`, which mania diffs fail by design (D-12) while the importer must store bytes verbatim. All kept `.osu` must agree (conflict or submitted/unsubmitted mix = hard fail). Submitted → `songs/<set-id>/<entry name>`; unsubmitted (all ids ≤ 0/absent, per user veto of the hard fail) → `songs/unsubmitted/<hash8>/<entry name>`, `hash8` = first 8 hex of SHA-256 over, for every kept entry sorted by raw name, the line `<raw name>\n<sha256-hex>\n` — deterministic, so re-imports dedup (formula `[REVISITABLE]`). Entry names land verbatim after `sanitize_rel_path` + `.`-component/separator normalization (no case folding — Linux FS is case-sensitive). | §5.2 layout + the handoff note ("keep audio/.osu/bg image; skip video/.osb/skins"). Unsubmitted maps must not hard-fail (user veto P1) and must dedup deterministically. |
 | D-44 | **`.osz` failure posture**: hard fail BEFORE any write on — no kept `.osu`, set-id conflict, two entries resolving to the same target (different raw spellings; same-name duplicates are collapsed by zip's reader before resolution, last wins — pinned by test), declared per-entry/total/entry-count caps (512 MiB / 2 GiB / 10 000, `[REVISITABLE]`). A failed import never touches `index.json` (fail-before-write, test-pinned). Unsafe entry names and filter misses are skips, reported. Every read is `take()`-guarded so a lying local header cannot exceed the per-entry cap; an actual-oversize abort mid-store leaves written bytes unindexed (index saved only at the end, osz.rs ordering guarantee). The index is saved once per import and only when mutated — a pure dedup re-import leaves `index.json` untouched. | Zip bombs and broken archives must never cost bytes or index state; ambiguity is refused, garbage entries are skipped — the split mirrors `sanitize_rel_path`'s doc ("the importer pre-filters skips with it, hard failures surface as BadPath"). |
+| D-45 | **Library loading = per-set manifest (index schema v2). User-ruled 2026-11-15: ACCEPT — the user's ruling at the commit-5 plan review ("record it as my ruling"), with the v1-reads-as-v2 migration below; implementation rides the timeline-visualizer commit, not commit 5.** Why v1 cannot load a deduped set: D-41 dedup records only the EXISTING canonical path — when set B's file dedups into set A's copy, `store_file` returns without ever persisting that `songs/B/<name>` was supposed to exist. A directory-walk loader then finds B's `.osu` files but not B's audio, and a hash lookup cannot recover the mapping (the missing file's hash is unknowable from disk — B's `.osu` names the audio file but not its hash). Ruling: v2 adds `sets: BTreeMap<set-key, { entries: BTreeMap<entry-name, sha256> }>` recorded by the importer for EVERY kept entry (deduped or not); loaders resolve set → manifest → hashes → canonical paths; set-key = `<set-id>` or `unsubmitted/<hash8>` (the D-43 routing keys). Migration: a v1 index is READ as v2-with-empty-`sets` + a warn ("re-import your .osz files to rebuild manifests" — D-41 dedup makes that free); an index NEWER than supported stays a hard `Corrupt` (D-13). | A set whose audio dedups into another set must stay playable — the D-41 reference model is only sound if the set→files mapping survives dedup; song select (phase 8) needs set listing anyway. Hash-lookup-only was rejected: the requesting set's name→hash mapping is lost at dedup time. |
 
 ---
 
@@ -763,7 +779,7 @@ scoring math (§11 I-09), never in the live game.
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
 | **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ✅ **DONE (2026-11-12, run 2 at commit 851e68b): dev/validate-phase2.sh = 14/14.** Music sync (user y) and degraded amber band (user y). Q-8 answered: stream `rate=44100 channels=2` — the file's native rate accepted (mono source duplicated to stereo), clock counts the file's samples. §5.2 cache: miss→hit verified, entries under `~/.cache/hyprbeat/decoded/<sha256>.f32` (layout bug fixed en route: `cache_path` had written at the cache root, so the script's wipe never took effect). Pause/rebase: freeze at 1931 ms, final 4933 (expected ≈4931). D-37 live: `buffer=fixed-256`, observed callback period 1.33 ms (was 32 ms device default). §3.6: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 / p95 2.60 ms (≤ 25 ms — PASS, Q-9 estimate); tap→flash p50 13.31 / p95 35.06 ms. Benches: mix 512-frame stereo 2.15 µs (0.16 % of the 1.33 ms period); clock time_ms 1.75 ns; pause+resume 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms (one-shot, off-RT). En-route fixes: D-37/D-38 script greps, E0382 in `build_stream` (D-39), cache layout. Optional spot checks (cold start ≤ 2 s, RSS ≤ 150 MB, CPU ≤ 2 %) closed 2026-11-13 (warm-up run; numbers + caveat in close-out) |
-| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`). Next: commit 5 = import CLI dispatch + validation script on a real user-supplied `.osz` → visualizer → exit validation |
+| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`; committed `f4d1cb7` and PUSHED — dev-machine gates green, 143 tests). Session 3 (2026-11-15): commit 5 = import CLI (`--import PATH`/`--library-root DIR` + `run_cli` + D-38 log/exit contract) + `dev/validate-phase3-import.sh` (22 synthetic checks green in the producing sandbox against a clone of `f4d1cb7`; real-specimen section rides `OSZ_SPECIMEN`, Q-10) + committed fixtures (`dev/fixtures/`, generator committed — user-OK'd at the plan review); D-45 user-ruled ACCEPT (§9). Next: timeline visualizer (carries the D-45 index-v2 loader) → real-specimen validation → phase-3 exit |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
 | **6** | Sliders (§7.3), spinners, stacking, new-combo colours | A modern tech map plays correctly end-to-end | ⬜ |
@@ -1003,7 +1019,13 @@ adds the new one, and updates dependent sections.
   machine should spot-check ONE real mp3 from the user's own library through
   `--audio` during validation (decode + playback + cache hit on re-run). No
   automated fixture shipped — real `.osz`-grade audio arrives with phase 3's
-  golden files.
+  golden files. **Update 2026-11-15 (commit 5)**: now scripted —
+  `dev/validate-phase3-import.sh` step 8 (`OSZ_SPECIMEN=…`) imports the real
+  `.osz`, proves real-bytes dedup, then plays the imported audio through
+  `--audio` (cache miss → hit) under a redirected `XDG_CACHE_HOME`.
+  Awaiting the specimen from the user (kept outside the repo, I-03); the
+  cold-start/full-RSS halves of the old phase-2 spot check ride the
+  visualizer (full engine + one map).
 - **Q-11 (new, 2026-11-13, phase 2)**: ~~does PipeWire's ALSA compat node
   actually honor cpal's `BufferSize::Fixed(256)` (D-37), or does it clamp /
   adjust the period?~~ **ANSWERED 2026-11-12 (run 2): YES — accepted, and
@@ -1239,6 +1261,81 @@ header, §4, §5, §9 (D-42/D-43/D-44), §10 row 3, §14 (Q-15), this record.
 - Import library is CLI-free by design (user P4 split): commit 5 adds the
   CLI dispatch + the validation script on a real user-supplied `.osz`
   specimen (request it then; Q-10 rides on it).
+
+<!-- ---------------------------------------------------------------- -->
+<!-- Phase-3 session 3 record (appended 2026-11-15). -->
+
+## Phase-3 session 3 (2026-11-15) — import CLI + validation script (commit 5)
+
+Commits: 4 `f4d1cb7` applied and PUSHED to `origin/main` (dev-machine
+offline gates green: fmt, clippy `-D warnings`, `cargo test --lib` =
+143 passed; staged stat matched the prediction — 6 files, +1390/−26) →
+commit 5 (this commit: `--import PATH` / `--library-root DIR` in `cli.rs`
++ dispatch in `main.rs` + `run_cli`/log contract in `import.rs` +
+`dev/validate-phase3-import.sh` + committed synthetic fixtures
+`dev/fixtures/{submitted,unsubmitted,oversize}.osz` with the generator
+`dev/gen_osz_fixtures.py` committed for provenance — I-03: every byte
+synthetic; the dev machine has no python3, so the fixtures are committed
+binaries, sha256-pinned in the script, the D-34 pattern).
+
+- Baseline method upgraded: this is the first delivery verified against a
+  CLONE of the public repo at `f4d1cb7` (the handoff note's read-only
+  clone authorization), not a reconstruction — the sandbox gates ran on
+  the user's actual tree (143 tests) before any commit-5 byte was added.
+  The user's regenerated `Cargo.lock` matched the sandbox's byte-for-byte
+  (blob `ca049e3…`).
+- CLI shape: `--import` is a pure library operation (no render, no audio
+  device); it conflicts with `--headless`/`--probe`/`--latency-test`/
+  `--audio`/`--no-audio`; `--library-root` without `--import` is an error
+  until song select grows its own library flag (phase 8); inert knobs
+  (`--fps`, `--size`, `--timeout`) stay legal alongside and are ignored.
+- Exit-code + log contract (new, D-38 style): skips are reported, not
+  failures — a successful import (even with skips) exits 0, `ImportError`
+  exits 1; one info line per skipped entry (`name=… reason=…`), one warn
+  line per D-41 repair / D-42 displacement, one grep-able summary line
+  (`osz import complete set=… stored=… deduped=… repaired=… replaced=…
+  skipped=… index_saved=…`; string fields via the `%` sigil).
+- `ImportError` grew two wrapper variants: `Open` (the `.osz` file itself
+  unopenable) and `NoDataDir` (no `--library-root` and no XDG data dir
+  resolves).
+- Script: hermetic (every import lands in a throwaway `--library-root`/
+  redirected XDG dir; the real library + cache are never touched); steps:
+  fixture sha256s → submitted import + layout + index → dedup re-import
+  with byte-identical `index.json` → skip reporting → unsubmitted
+  `unsubmitted/<hash8>` routing (+ deterministic re-import) → hostile
+  600-MiB-declared archive refused with NOTHING written → XDG default
+  root → `OSZ_SPECIMEN` real-specimen section (import, real-bytes dedup,
+  Q-10 `--audio` decode miss→hit, `XDG_CACHE_HOME`-redirected). Sandbox
+  runs, both specimen-less (awaiting the user's `.osz`): a first full
+  run on a pre-final revision of the script was dropped — a run
+  certifies only the bytes it ran — and the final run on the shipped
+  script bytes: **22 passed, 0 failed, 1 skipped** (the specimen
+  section, by design).
+- Δ-from-approved, flagged at delivery per the caps lesson (D-44 note):
+  (a) committed binary fixtures + generator — flagged, user-OK'd at the
+  commit-5 plan review; justification: no python3 on the dev machine,
+  deterministic fixtures make the script self-contained and repeatable;
+  (b) script env knobs `BIN=` /
+  `OSZ_SPECIMEN=` / `HYPRBEAT_AUDIO_SPECIMEN=0`; (c) `--library-root`
+  strictness (error without `--import`); (d) the exit-code/log contract
+  above; (e) Q-10 split: decode+cache rides this script as §14 always
+  said, cold-start/full-RSS ride the visualizer (they were phase-2's
+  optional spot checks, not Q-10).
+- D-45 ruled (user ACCEPT, 2026-11-15, at the commit-5 plan review —
+  recorded as the user's ruling, with the v1-reads-as-v2 migration):
+  library loading needs a per-set manifest (index schema v2) — §9. NOT
+  in this commit (CLI-only scope, user P4 split); the visualizer commit
+  carries it with its loader + tests. Until then imports write v1
+  indexes without manifests; one re-import after v2 heals them (D-41
+  dedup makes that free).
+- Gates on the clone of `f4d1cb7` + this tree (cargo 1.100.0): baseline
+  143 passed at `f4d1cb7`, then `cargo check --locked`, `cargo fmt
+  --check`, `cargo clippy --all-targets --locked -- -D warnings`,
+  `cargo test --lib` = 146 passed (143 + 3 new: the `cli.rs` import-flag
+  suite + the two `run_cli` tests), lock blob unchanged after all gates.
+- Sections touched by commit 5: header, §3 (tree note), §5.2 (index.json
+  line + CLI realization), §9 (D-20 amendment + D-45), §10 row 3, §14
+  (Q-10), this record.
 
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
 Check §10, do the next unfinished phase (phase 3), keep the invariants,
