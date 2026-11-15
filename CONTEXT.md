@@ -5,25 +5,37 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-15 (D-41 ruling + library index) — **phase 2
-> DONE** (validation run 2 = 14/14 at `851e68b`, 2026-11-12; optional §3.6
-> spot checks closed 2026-11-13 — numbers + carried items in the appended
-> Phase-2 close-out record, mirrored in §10 row 2). **Phase 3, session 1
-> landed and pushed**: `31e6175` (.osu v14 parser — pure, wiki-verified,
-> D-40, §5.1/§7.3 fixes) → `5c61c05` (golden corpus — 7 fixtures +
-> file-level tests, §5.1) → `f62b142` (session-1 close-out: §12.1 devshell
-> note, Q-13 lean, handoff marked served). Offline gates green at `f62b142`,
-> run in the devshell on the dev machine: `cargo fmt --check`,
-> `cargo clippy --all-targets -- -D warnings`, `cargo test --lib` = 119
-> passed.
-> **Current phase**: 3 — **IN PROGRESS** (parser + golden corpus done;
-> §10 row 3). D-41 ruled 2026-11-15 (Q-13): known-hash re-import records a
-> REFERENCE to the existing extraction, with an import/load existence
-> check and a repair-from-incoming-bytes path (§9; delete-while-referenced
-> parked as §14 Q-14). Next: commit 3 = library index per §5.2 (XDG dirs
-> I-07, `index.json` D-13, SHA-256 dedup). Then `.osz` zip import (§5.2),
-> the timeline visualizer, then phase-3 exit validation on a real
-> user-supplied map + audio (Q-10 rides on it).
+> **Last updated**: 2026-11-15 (phase 3, session 2: D-41 ruling + library
+> index + `.osz` import library; record corrected — the `rust-version`
+> bump and the 10 clippy fixes landed in the preceding refactor commit,
+> not in commit 4) — **phase 2 DONE** (validation run 2 =
+> 14/14 at `851e68b`, 2026-11-12; optional §3.6 spot checks closed
+> 2026-11-13 — numbers + carried items in the appended Phase-2 close-out
+> record, mirrored in §10 row 2). **Session 1 landed and pushed**:
+> `31e6175` (.osu v14 parser — pure, wiki-verified, D-40, §5.1/§7.3 fixes)
+> → `5c61c05` (golden corpus — 7 fixtures + file-level tests, §5.1) →
+> `f62b142` (session-1 close-out; gates green at `f62b142`: fmt, clippy
+> `-D warnings`, 119 tests). **Session 2**: D-41 ruled 2026-11-15 (Q-13 →
+> REFERENCE, §9; delete-while-referenced parked as §14 Q-14) and landed as
+> `a579ca1` (library index per §5.2 — XDG dirs I-07, `index.json` D-13 v1,
+> SHA-256 dedup, reference + dangling repair; serde/serde_json pulled
+> forward per §4; gates green on the dev machine at rust-version 1.85:
+> fmt, clippy `-D warnings`, 128 tests). Preceding refactor commit A
+> `24707a1` (`refactor: clippy fixes for rust-version 1.88`):
+> `rust-version` 1.85 → 1.88 ahead of `zip 9.6` (its MSRV floor, §4) +
+> the 10 clippy hits the 1.88 lint set reports in the pre-existing
+> audio/wayland code, fixed as 8 behavior-preserving rewrites
+> (`as_chunks`, let-chains); applied on the dev machine — gates green
+> (fmt, clippy `-D warnings`, 128 tests) + Wayland smoke pass. Commit 4
+> (this commit) = the `.osz` zip import library: `src/beatmap/import.rs`
+> + the D-42 replace-on-update guard in `osz.rs`; `zip 9.6` added
+> default-features-off. The CLI wrapper is deliberately split to
+> commit 5.
+> **Current phase**: 3 — **IN PROGRESS** (parser + corpus + library index +
+> `.osz` import library done; §10 row 3). Next: commit 5 = import CLI
+> dispatch + the validation script on a real user-supplied `.osz` specimen
+> (Q-10 rides on it), then the timeline visualizer, then phase-3 exit
+> validation.
 > 2026-11-14 audit note: this header was six commits stale (it still said
 > phase 2 "awaiting validation run 2" — §13 item 4 had lapsed since
 > `851e68b`). The same pass fixed: the Phase-2 close-out commit chain
@@ -293,6 +305,19 @@ forward from the phase-5 config plan for `index.json` (D-13) — a
 fail-safe JSON reader wants a battle-tested parser, and §6 config reuses
 both. `Cargo.lock` re-committed.*
 
+*Phase-3 status (.osz import commit): `zip 9.6` added with
+`default-features = false` and only `deflate`, `deflate-flate2`,
+`deflate64` — store + deflate read (importer) and write (in-memory test
+fixtures), no crypto/bzip2/zstd/lzma/ppmd/time, so the tree stays small
+(§4). `rust-version` 1.85 → 1.88 — zip 9.6 declares MSRV 1.88, making it
+the crate-stack floor (amends D-25's phase-1 pin; the user verifies
+`rustc >= 1.88` in the devshell) — landed in the preceding
+`refactor: clippy fixes for rust-version 1.88` commit together with the
+10 clippy hits the 1.88 lint set reports in the pre-existing
+audio/wayland code (8 behavior-preserving rewrites: `as_chunks`,
+let-chains), not in the .osz import commit itself. Corrected 2026-11-15:
+the original note attributed the bump to the import commit.*
+
 ---
 
 ## 5. Module layout
@@ -321,7 +346,10 @@ src/
 ├── beatmap/
 │   ├── mod.rs
 │   ├── osu.rs            .osu text parser (v14; see §5.1)
-│   ├── osz.rs            zip import, SHA-256 dedup, library index
+│   ├── osz.rs            library index + content store (D-13/D-41/D-42)
+│   ├── import.rs         .osz zip import: allowlist filter, set-id
+│                         routing, unsubmitted hash8 dirs, caps
+│                         (D-43/D-44; CLI wrapper lands in the next commit)
 │   ├── model.rs          Beatmap, HitObject, TimingPoint, Difficulty attrs
 │   └── slider.rs         path math: Catmull-Rom / perfect arcs / linear,
 │                         equidistant arc-length reparam, slider ticks
@@ -722,6 +750,9 @@ scoring math (§11 I-09), never in the live game.
 | D-39 | **`build_stream` ownership: one `Arc` clone per cpal callback closure** (fix for the E0382 that shipped in the 2026-11-13 fix drop). What happened: that drop was edited in a recycled sandbox that could no longer compile (no alsa/xkb headers), so the callback wiring never got borrow-checked — `let shared = shared.clone();` shadowed the `&Arc` param, the `move` data callback consumed the binding, and the error callback's own `let shared = shared.clone();` then borrowed a moved value. Fix in `src/audio/mod.rs`: the data callback captures its own `shared_data` clone; the error callback clones the ORIGINAL param (both callbacks must own an `Arc` — cpal requires `Send + 'static` closures). Process lesson, in force: **a re-delivery that cannot run at least `cargo check --all-targets` in its own sandbox is not verified** — byte-diff, fmt and grep anchors caught nothing here; this time check + fmt + clippy `-D warnings` + `test --lib` (84 passed) all ran green before sending | E0382-class ownership bugs are invisible to byte-comparisons; "awaiting run 2" was actually "run 2 cannot start". One compile gate in the producing sandbox keeps dev-machine round trips single-purpose |
 | D-40 | Phase-3 parser is OUR OWN pure module (`src/beatmap`, §5.1) — **rosu-pp is NOT added**. §4's verify-in-phase-3 done (docs.rs, rosu-pp 4.0.1, checked 2026-11-13): it exposes a calculation-oriented `Beatmap` parsed via `Beatmap::from_path` (file I/O), a port of lazer's difficulty/PP calculators, with no documented old-format lenient parsing, no raw per-object fields (hitSample / edge sounds / combo skip), and no zero-I/O parse satisfying I-09. The game's loader stays dep-free and pure; rosu-pp stays parked as a candidate only for star-rating/PP display (v0.2+, revisit then). | Own parser keeps the tree small (§4), I-09-pure + unit-testable, and the D-07 posture clean; PP calc is not v0.1 scope. |
 | D-41 | Known-hash re-import (Q-13) = **REFERENCE**: if the incoming file's SHA-256 is already indexed and the canonical copy exists, record a reference and write nothing. Import AND load verify the canonical target exists; a missing target is repaired by re-extracting the incoming bytes at the new target and repointing the entry (mandated test). Deleting a canonical extraction while still referenced is out of scope for the library-index commit → §14 Q-14. | §5.2 content addressing + the D-32 hash-keyed decode cache already store identical bytes once; re-extraction is wasted I/O. User-ruled 2026-11-15. |
+| D-42 | **Map-update re-import = explicit REPLACE.** When hash-UNKNOWN bytes are stored at a target path another entry still claims (same set-id + entry name, different bytes), that entry is displaced BEFORE the write: its index entry removed, the new bytes written over the file, the new hash inserted at that path (`Imported::replaced` reports the displaced hash). Known hashes NEVER displace (D-41 reference wins, nothing written); the dangling-repair branch carries the same guard. Documented crash window: bytes hit disk before the batched index save (osz.rs ordering guarantee), so a crash mid-import can leave a stale claim until the next import of that hash — load verifies existence, not bytes; a byte-verify pass is parked as §14 Q-15. Mandated tests: unit in osz.rs (replace, dedup-no-displace, repair-displaces) + end-to-end in import.rs. | Overwriting while the old entry claims the path makes the index lie (old hash → new bytes). Refusing breaks the re-import-the-updated-.osz story; hash-suffixed names break the `songs/<set-id>/<name>` layout. User-ruled 2026-11-15. |
+| D-43 | **`.osz` routing (import library commit)**: keep = `*.osu` + audio (`.mp3 .ogg .flac .wav` — mirrors the symphonia features) + images (`.jpg .jpeg .png`); everything else (video, `.osb`, skins, unknown) is skipped and reported. One `.osz` = one set: the set id comes from the kept `.osu` files' `[Metadata] BeatmapSetID` via a lenient metadata-only scan — NOT `parse_osu`, which mania diffs fail by design (D-12) while the importer must store bytes verbatim. All kept `.osu` must agree (conflict or submitted/unsubmitted mix = hard fail). Submitted → `songs/<set-id>/<entry name>`; unsubmitted (all ids ≤ 0/absent, per user veto of the hard fail) → `songs/unsubmitted/<hash8>/<entry name>`, `hash8` = first 8 hex of SHA-256 over, for every kept entry sorted by raw name, the line `<raw name>\n<sha256-hex>\n` — deterministic, so re-imports dedup (formula `[REVISITABLE]`). Entry names land verbatim after `sanitize_rel_path` + `.`-component/separator normalization (no case folding — Linux FS is case-sensitive). | §5.2 layout + the handoff note ("keep audio/.osu/bg image; skip video/.osb/skins"). Unsubmitted maps must not hard-fail (user veto P1) and must dedup deterministically. |
+| D-44 | **`.osz` failure posture**: hard fail BEFORE any write on — no kept `.osu`, set-id conflict, two entries resolving to the same target (different raw spellings; same-name duplicates are collapsed by zip's reader before resolution, last wins — pinned by test), declared per-entry/total/entry-count caps (512 MiB / 2 GiB / 10 000, `[REVISITABLE]`). A failed import never touches `index.json` (fail-before-write, test-pinned). Unsafe entry names and filter misses are skips, reported. Every read is `take()`-guarded so a lying local header cannot exceed the per-entry cap; an actual-oversize abort mid-store leaves written bytes unindexed (index saved only at the end, osz.rs ordering guarantee). The index is saved once per import and only when mutated — a pure dedup re-import leaves `index.json` untouched. | Zip bombs and broken archives must never cost bytes or index state; ambiguity is refused, garbage entries are skipped — the split mirrors `sanitize_rel_path`'s doc ("the importer pre-filters skips with it, hard failures surface as BadPath"). |
 
 ---
 
@@ -732,7 +763,7 @@ scoring math (§11 I-09), never in the live game.
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
 | **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ✅ **DONE (2026-11-12, run 2 at commit 851e68b): dev/validate-phase2.sh = 14/14.** Music sync (user y) and degraded amber band (user y). Q-8 answered: stream `rate=44100 channels=2` — the file's native rate accepted (mono source duplicated to stereo), clock counts the file's samples. §5.2 cache: miss→hit verified, entries under `~/.cache/hyprbeat/decoded/<sha256>.f32` (layout bug fixed en route: `cache_path` had written at the cache root, so the script's wipe never took effect). Pause/rebase: freeze at 1931 ms, final 4933 (expected ≈4931). D-37 live: `buffer=fixed-256`, observed callback period 1.33 ms (was 32 ms device default). §3.6: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 / p95 2.60 ms (≤ 25 ms — PASS, Q-9 estimate); tap→flash p50 13.31 / p95 35.06 ms. Benches: mix 512-frame stereo 2.15 µs (0.16 % of the 1.33 ms period); clock time_ms 1.75 ns; pause+resume 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms (one-shot, off-RT). En-route fixes: D-37/D-38 script greps, E0382 in `build_stream` (D-39), cache layout. Optional spot checks (cold start ≤ 2 s, RSS ≤ 150 MB, CPU ≤ 2 %) closed 2026-11-13 (warm-up run; numbers + caveat in close-out) |
-| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (§5.2: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4). Next: `.osz` zip import → visualizer → exit validation |
+| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`). Next: commit 5 = import CLI dispatch + validation script on a real user-supplied `.osz` → visualizer → exit validation |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
 | **6** | Sliders (§7.3), spinners, stacking, new-combo colours | A modern tech map plays correctly end-to-end | ⬜ |
@@ -1017,6 +1048,16 @@ adds the new one, and updates dependent sections.
   reference dangles them. Until designed: the app never deletes stored
   files; dangling references are detected on index load (reported,
   entries kept) and repaired on re-import of the same hash (D-41).
+- **Q-15 (new, 2026-11-15, phase 3, from the D-42 crash window)**: index
+  load verifies that each entry's canonical file EXISTS, not that its
+  bytes still hash to the claimed value (hashing every file on load is
+  O(library) I/O per start). A crash between a D-42 replace-write and the
+  batched index save can therefore leave a stale claim (old hash → new
+  bytes) that existence checks cannot see; no code path creates this
+  state except a crash mid-import, and the next import of that hash
+  rewrites the file. Parked until there is a real need: a `verify`
+  subcommand — hash every stored file, report/repair mismatches (the
+  `git fsck` analogue). Do not add it speculatively.
 
 ---
 
@@ -1149,6 +1190,55 @@ HEAD: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   devshell "to be validated" though it ran the session-1 gates, §12.3
   carrying pre-D-37 bench figures contradicting the run-2 close-out.
   Fixed in the audit commit; records only, nothing else moved.
+
+<!-- ---------------------------------------------------------------- -->
+<!-- Phase-3 session 2 record (appended 2026-11-15). -->
+
+## Phase-3 session 2 (2026-11-15) — D-41, library index, .osz import library
+
+Commits: `a579ca1` (commit 3: library index per §5.2 — XDG dirs I-07,
+`index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair;
+serde/serde_json pulled forward; offline gates green on the dev machine
+at rust-version 1.85: fmt, clippy `-D warnings`, `cargo test --lib` =
+128 passed; Cargo.lock diff = the two serde lines inside the hyprbeat
+stanza) → commit A `24707a1`, `refactor: clippy fixes for rust-version 1.88`
+(`rust-version` 1.85 → 1.88 ahead of `zip 9.6` — its MSRV is the crate
+floor — plus the 10 clippy hits the 1.88 lint set reports in the
+pre-existing audio/wayland code, fixed as 8 behavior-preserving
+rewrites: `as_chunks` in `decode.rs`, let-chains in `mixer.rs`,
+`latency.rs`, `wayland/mod.rs`; 5 files, +64/−63; applied on the dev
+machine — gates green (fmt, clippy `-D warnings`, `cargo test --lib` =
+128 passed) and the Wayland smoke passed; CONTEXT.md untouched —
+this record carries the documentation for both commits) → commit 4 (this
+commit: `.osz` zip import library `src/beatmap/import.rs` + the D-42
+replace-on-update guard in `osz.rs`; `zip 9.6` added default-features-off
+with `deflate`/`deflate-flate2`/`deflate64`). Correction (2026-11-15):
+the original close-out attributed the `rust-version` bump to commit 4
+and implied clippy was green at 1.88 — it was not: clippy at 1.88
+reported these 10 hits the moment the bump was applied, and no clippy
+run had passed at 1.88 before commit A. Sections touched by commit 4:
+header, §4, §5, §9 (D-42/D-43/D-44), §10 row 3, §14 (Q-15), this record.
+
+- D-41 ruled (user, 2026-11-15): known-hash re-import = REFERENCE (§9;
+  Q-13 closed; delete-while-referenced parked as Q-14).
+- D-42 (user-ruled): a map-update re-import (same set-id + entry name,
+  different bytes) = explicit replace that fixes the stale entry — the
+  displaced entry is removed before the overwrite; known hashes never
+  displace (D-41 precedence). Crash window documented; byte-verify parked
+  as Q-15.
+- D-43: `.osz` routing — allowlist filter (osu/audio/images, rest
+  skipped+reported), one-.osz-one-set set-id scan, submitted →
+  `songs/<set-id>/<name>`, unsubmitted → `songs/unsubmitted/<hash8>/`
+  with hash8 = SHA-256 over sorted `name\nhash\n` lines of kept entries
+  (first 8 hex; `[REVISITABLE]`).
+- D-44: fail-before-write posture — duplicate resolved target, set-id
+  conflict, no `.osu`, caps 512 MiB/2 GiB/10 000 entries
+  (`[REVISITABLE]`) hard-fail before any byte is stored; unsafe names and
+  filter misses skip with report; `take()`-guarded reads; index saved
+  once, only when mutated.
+- Import library is CLI-free by design (user P4 split): commit 5 adds the
+  CLI dispatch + the validation script on a real user-supplied `.osz`
+  specimen (request it then; Q-10 rides on it).
 
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
 Check §10, do the next unfinished phase (phase 3), keep the invariants,

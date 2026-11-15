@@ -27,7 +27,10 @@
 //! posture): timing-point lines with fewer than 7 comma fields (pre-v5
 //! legacy) and osu!mania holds (type bit 7) fail with explicit errors.
 
-pub mod osz; // §5.2 library index + content-addressed store; zip import next commit
+// §5.2 .osz zip import: filter, set-id routing, caps (D-43/D-44)
+pub mod import;
+// §5.2 library index + content-addressed store (D-13/D-41/D-42)
+pub mod osz;
 
 use std::fmt;
 

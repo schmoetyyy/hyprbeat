@@ -16,11 +16,17 @@
 //! Identical bytes are therefore stored exactly once — the library-side
 //! mirror of the D-32 hash-keyed decode cache.
 //!
+//! Update re-imports (D-42): hash-UNKNOWN bytes aimed at a path another
+//! entry still claims (same set-id + entry name, different bytes) displace
+//! that entry before the write — a stale claim (old hash → new bytes) must
+//! never survive the call. Known hashes never displace anything; see
+//! [`LibraryIndex::store_file`].
+//!
 //! Failure posture (I-06/I-08 style): a corrupt `index.json` fails safe —
 //! typed error, file left byte-identical on disk, no silent wipe, no temp
 //! residue. Index saves are atomic (temp file + fsync + rename, the D-32
-//! pattern). Zip import (`.osz`) lands in the next commit and drives this
-//! module.
+//! pattern). The `.osz` importer ([`super::import`]) drives this module in
+//! batches: one load, many [`LibraryIndex::store_file`], one save.
 //!
 //! Zero Wayland/audio I/O; tests supply their own temp roots (I-09).
 
@@ -138,7 +144,7 @@ impl Default for LibraryIndex {
     }
 }
 
-/// Outcome of storing one file (the D-41 outcomes).
+/// Outcome of storing one file (the D-41 outcomes + the D-42 displacement).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Imported {
     /// Lowercase-hex SHA-256 of the incoming bytes.
@@ -151,6 +157,10 @@ pub struct Imported {
     /// Known hash + MISSING canonical file: the incoming bytes were
     /// re-extracted at the new target and the entry repointed (repair).
     pub repaired: bool,
+    /// Update re-import (D-42): the hash of the entry that claimed the
+    /// target path and was displaced (entry removed, its bytes overwritten
+    /// by the incoming ones). `None` when nothing was displaced.
+    pub replaced: Option<String>,
 }
 
 impl LibraryIndex {
@@ -247,6 +257,14 @@ impl LibraryIndex {
     /// Ordering guarantee: bytes hit disk BEFORE the index can reference
     /// them, so a crash never leaves the index claiming a missing file —
     /// worst case is an unindexed extra file that the next import rewrites.
+    ///
+    /// D-42 (update re-import): when the incoming hash is NEW and another
+    /// entry still claims the target path, that entry is displaced first
+    /// (reported as [`Imported::replaced`]) — its bytes are about to be
+    /// overwritten, and a surviving claim would make the index lie. A KNOWN
+    /// hash never displaces anything (D-41 reference wins, nothing written),
+    /// even when the requested target is claimed by another entry. The
+    /// dangling-repair branch carries the same guard.
     pub fn store_file(
         &mut self,
         bytes: &[u8],
@@ -258,15 +276,20 @@ impl LibraryIndex {
         if let Some(entry) = self.files.get(&hash) {
             if paths.songs_dir.join(&entry.path).exists() {
                 // D-41 reference: identical bytes already stored — keep.
+                // Known hashes never displace the target's claimant (D-42).
                 return Ok(Imported {
                     hash,
                     path: entry.path.clone(),
                     deduped: true,
                     repaired: false,
+                    replaced: None,
                 });
             }
             // Dangling: canonical copy is gone — re-extract the incoming
             // bytes at the NEW target and repoint the entry (D-41 repair).
+            // D-42 guard: the new target may be claimed by another entry
+            // whose bytes the write below would clobber.
+            let displaced = self.displace_claimant(&target, Some(&hash));
             write_store_file(&paths.songs_dir, &target, bytes)?;
             self.files.insert(
                 hash.clone(),
@@ -280,8 +303,14 @@ impl LibraryIndex {
                 path: target,
                 deduped: false,
                 repaired: true,
+                replaced: displaced,
             });
         }
+        // D-42: hash-unknown bytes at a claimed path = map update. The
+        // write below overwrites the claimant's canonical copy, so its
+        // entry must go first — the index never claims a path whose bytes
+        // belong to another hash.
+        let displaced = self.displace_claimant(&target, None);
         write_store_file(&paths.songs_dir, &target, bytes)?;
         self.files.insert(
             hash.clone(),
@@ -295,7 +324,25 @@ impl LibraryIndex {
             path: target,
             deduped: false,
             repaired: false,
+            replaced: displaced,
         })
+    }
+
+    /// D-42 helper: remove the entry whose canonical path is `target` (if
+    /// any, apart from `except`) and return its hash. Called immediately
+    /// before bytes are written over that path.
+    fn displace_claimant(&mut self, target: &str, except: Option<&str>) -> Option<String> {
+        let found = self
+            .files
+            .iter()
+            .find(|(hash, entry)| Some(hash.as_str()) != except && entry.path == target)
+            .map(|(hash, _)| hash.clone());
+        if let Some(hash) = found {
+            self.files.remove(&hash);
+            Some(hash)
+        } else {
+            None
+        }
     }
 
     /// Self-contained import: load → store → save. Convenience for
@@ -600,6 +647,90 @@ mod tests {
         assert!(dangling.is_empty());
         assert_eq!(reloaded, index);
         assert_eq!(reloaded.files().len(), 2);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn update_reimport_replaces_stale_entry() {
+        // D-42 (mandated test): same logical path, different bytes. The new
+        // store must displace the old entry instead of leaving the index
+        // claiming the OLD hash at a path that now holds the NEW bytes.
+        let base = tmpdir("update-replace");
+        let paths = paths_from(&base);
+        let mut index = LibraryIndex::default();
+        let old = index.store_file(BYTES_A, "100/audio.mp3", &paths).unwrap();
+        assert!(old.replaced.is_none());
+        index.save(&paths).unwrap();
+
+        let new = index.store_file(BYTES_B, "100/audio.mp3", &paths).unwrap();
+        assert!(!new.deduped && !new.repaired);
+        assert_eq!(new.replaced.as_deref(), Some(old.hash.as_str()));
+        // Exactly one entry survives: the new hash → the path.
+        assert_eq!(index.files().len(), 1);
+        assert!(index.lookup(&old.hash).is_none());
+        assert_eq!(index.lookup(&new.hash).unwrap().path, "100/audio.mp3");
+        // The bytes on disk are the new ones, and the reloaded index agrees
+        // (no dangling, no stale claim).
+        assert_eq!(
+            fs::read(paths.songs_dir.join("100/audio.mp3")).unwrap(),
+            BYTES_B
+        );
+        index.save(&paths).unwrap();
+        let (reloaded, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert!(dangling.is_empty());
+        assert_eq!(reloaded, index);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn known_hash_dedup_never_displaces_target() {
+        // D-41 precedence over D-42: a known hash is a reference and never
+        // writes — even when the requested target is claimed by another
+        // entry. That entry's canonical copy stays intact.
+        let base = tmpdir("dedup-no-displace");
+        let paths = paths_from(&base);
+        let mut index = LibraryIndex::default();
+        let a = index.store_file(BYTES_A, "100/audio.mp3", &paths).unwrap();
+        let _b = index.store_file(BYTES_B, "200/audio.mp3", &paths).unwrap();
+        let again = index.store_file(BYTES_B, "100/audio.mp3", &paths).unwrap();
+        assert!(again.deduped && !again.repaired);
+        assert!(again.replaced.is_none());
+        assert_eq!(again.path, "200/audio.mp3");
+        assert_eq!(index.files().len(), 2);
+        assert_eq!(index.lookup(&a.hash).unwrap().path, "100/audio.mp3");
+        // The bytes at the disputed target are still the original ones.
+        assert_eq!(
+            fs::read(paths.songs_dir.join("100/audio.mp3")).unwrap(),
+            BYTES_A
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn dangling_repair_displaces_claimant_of_new_target() {
+        // D-41 repair + D-42 guard combined: re-extracting a dangling hash
+        // at a target another entry claims must displace that entry, or the
+        // write would silently clobber its canonical bytes.
+        let base = tmpdir("repair-displace");
+        let paths = paths_from(&base);
+        let mut index = LibraryIndex::default();
+        let a = index.store_file(BYTES_A, "100/audio.mp3", &paths).unwrap();
+        let b = index.store_file(BYTES_B, "200/audio.mp3", &paths).unwrap();
+        index.save(&paths).unwrap();
+        // B's canonical copy vanishes; re-import B targeting 100's path.
+        fs::remove_dir_all(paths.songs_dir.join("200")).unwrap();
+        let (loaded, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert_eq!(dangling, vec![b.hash.clone()]);
+        let mut index = loaded;
+        let out = index.store_file(BYTES_B, "100/audio.mp3", &paths).unwrap();
+        assert!(out.repaired);
+        assert_eq!(out.replaced.as_deref(), Some(a.hash.as_str()));
+        assert_eq!(index.files().len(), 1);
+        assert_eq!(index.lookup(&b.hash).unwrap().path, "100/audio.mp3");
+        assert_eq!(
+            fs::read(paths.songs_dir.join("100/audio.mp3")).unwrap(),
+            BYTES_B
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 }

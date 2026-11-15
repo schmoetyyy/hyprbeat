@@ -57,6 +57,17 @@ directories = "5"
 # battle-tested parser, and phase 5 reuses both crates unchanged.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# ---- phase 3: .osz import (§5.2, D-43/D-44) ----
+# Zip container read (importer) + write (in-memory test fixtures).
+# `default-features = false` keeps the tree small (§4): store + deflate
+# (zopfli write side, flate2/zlib-rs read side) + deflate64 for legacy
+# archives — no crypto, no bzip2/zstd/lzma/ppmd, no time feature. zip's
+# MSRV (1.88) is the toolchain floor, hence the rust-version bump above.
+zip = { version = "9.6", default-features = false, features = [
+    "deflate",
+    "deflate-flate2",
+    "deflate64",
+] }
 
 [dev-dependencies]
 # §12.3 "Benchmarks (phase 2+): criterion for clock math". Dev-dependency
