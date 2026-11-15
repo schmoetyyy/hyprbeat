@@ -48,6 +48,12 @@ symphonia = { version = "0.5", default-features = false, features = [
 sha2 = "0.10"
 # XDG base dirs (I-07): ~/.cache/hyprbeat/decoded/<sha256>.f32 etc.
 directories = "5"
+# ---- phase 3: library index (§5.2, D-13) ----
+# index.json read/write. serde was planned for the phase-5 config system
+# (§4/§6) and is pulled forward here: a fail-safe JSON reader wants a
+# battle-tested parser, and phase 5 reuses both crates unchanged.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # §12.3 "Benchmarks (phase 2+): criterion for clock math". Dev-dependency

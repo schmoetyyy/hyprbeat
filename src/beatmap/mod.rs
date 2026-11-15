@@ -27,6 +27,8 @@
 //! posture): timing-point lines with fewer than 7 comma fields (pre-v5
 //! legacy) and osu!mania holds (type bit 7) fail with explicit errors.
 
+pub mod osz; // §5.2 library index + content-addressed store; zip import next commit
+
 use std::fmt;
 
 /// Default `StackLeniency` when the file omits the key (legacy default).

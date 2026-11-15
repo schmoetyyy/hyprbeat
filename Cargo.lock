@@ -761,6 +761,8 @@ dependencies = [
  "png",
  "pollster",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "sha2",
  "smithay-client-toolkit",
  "symphonia",
