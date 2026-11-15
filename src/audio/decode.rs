@@ -193,8 +193,8 @@ pub fn decode_cache(bytes: &[u8]) -> Result<Decoded, String> {
         return Err(bad("trailing garbage"));
     }
     let mut samples = Vec::with_capacity(total);
-    for chunk in payload[..total * 4].chunks_exact(4) {
-        samples.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in payload[..total * 4].as_chunks::<4>().0 {
+        samples.push(f32::from_le_bytes(*chunk));
     }
     Ok(Decoded {
         samples,

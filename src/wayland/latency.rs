@@ -85,10 +85,10 @@ impl LatencyStats {
             if mixed > tap.enqueue_ns {
                 to_mixed.push((mixed - tap.enqueue_ns) as f64 / 1e6);
             }
-            if let Some(frame) = tap.frame_ns {
-                if frame > tap.enqueue_ns {
-                    to_frame.push((frame - tap.enqueue_ns) as f64 / 1e6);
-                }
+            if let Some(frame) = tap.frame_ns
+                && frame > tap.enqueue_ns
+            {
+                to_frame.push((frame - tap.enqueue_ns) as f64 / 1e6);
             }
         }
         to_mixed.sort_by(|a, b| a.total_cmp(b));

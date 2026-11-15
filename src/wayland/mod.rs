@@ -538,21 +538,20 @@ impl App {
         self.gpu.queue.present(texture);
         // `--latency-test`: stamp the first frame submitted after the tap
         // (the flash rides on this very frame — photon leg of the report).
-        if self.args.latency_test && self.flash_deadline.is_some() {
-            if let (Some(tap), TimingState::Audio(engine)) =
+        if self.args.latency_test
+            && self.flash_deadline.is_some()
+            && let (Some(tap), TimingState::Audio(engine)) =
                 (self.latency_taps.last_mut(), &self.timing)
-            {
-                if tap.frame_ns.is_none() {
-                    tap.frame_ns = Some(
-                        engine
-                            .mixer
-                            .origin
-                            .elapsed()
-                            .as_nanos()
-                            .min(u64::MAX as u128) as u64,
-                    );
-                }
-            }
+            && tap.frame_ns.is_none()
+        {
+            tap.frame_ns = Some(
+                engine
+                    .mixer
+                    .origin
+                    .elapsed()
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64,
+            );
         }
         true
     }
@@ -584,28 +583,29 @@ impl App {
         let now = Instant::now();
 
         // --timeout safety (D-24)
-        if let Some(deadline) = self.deadline {
-            if now >= deadline {
-                tracing::warn!(
-                    timeout_s = ?self.args.timeout.map(|d| d.as_secs_f64()),
-                    "safety timeout reached, exiting (--timeout 0 disables; phase 7 retires the default)"
-                );
-                self.quit();
-                return;
-            }
+        if let Some(deadline) = self.deadline
+            && now >= deadline
+        {
+            tracing::warn!(
+                timeout_s = ?self.args.timeout.map(|d| d.as_secs_f64()),
+                "safety timeout reached, exiting (--timeout 0 disables; phase 7 retires the default)"
+            );
+            self.quit();
+            return;
         }
 
         // phase 2: runtime audio loss → degrade the clock, keep the
         // wallpaper alive (D-16/I-08). The RT error callback only stored a
         // flag; THIS is the safe context that acts on it.
-        if let TimingState::Audio(engine) = &mut self.timing {
-            if engine.stream_failed() && !engine.clock.is_degraded() {
-                tracing::error!(
-                    "audio stream failed at runtime — degrading to the wall clock \
-                     (timing now unranked; the amber degraded band turns on, I-12)"
-                );
-                engine.clock.degrade_to_wall();
-            }
+        if let TimingState::Audio(engine) = &mut self.timing
+            && engine.stream_failed()
+            && !engine.clock.is_degraded()
+        {
+            tracing::error!(
+                "audio stream failed at runtime — degrading to the wall clock \
+                 (timing now unranked; the amber degraded band turns on, I-12)"
+            );
+            engine.clock.degrade_to_wall();
         }
 
         // frame-callback watchdog
@@ -899,18 +899,17 @@ impl OutputHandler for App {
         output: wl_output::WlOutput,
     ) {
         // refresh integer scale when we have no fractional-scale object
-        if let Some(idx) = self.index_of_output(&output) {
-            if self.outputs[idx].fractional.is_none() {
-                if let Some(info) = self.output_state.info(&output) {
-                    let factor = scale::clamp_scale(info.scale_factor as f64);
-                    if (self.outputs[idx].scale - factor).abs() > f64::EPSILON {
-                        tracing::info!(output = %self.outputs[idx].name, factor, "output scale changed");
-                        self.outputs[idx].scale = factor;
-                        let logical = self.outputs[idx].logical;
-                        if self.outputs[idx].configured {
-                            self.resize_surface(idx, logical);
-                        }
-                    }
+        if let Some(idx) = self.index_of_output(&output)
+            && self.outputs[idx].fractional.is_none()
+            && let Some(info) = self.output_state.info(&output)
+        {
+            let factor = scale::clamp_scale(info.scale_factor as f64);
+            if (self.outputs[idx].scale - factor).abs() > f64::EPSILON {
+                tracing::info!(output = %self.outputs[idx].name, factor, "output scale changed");
+                self.outputs[idx].scale = factor;
+                let logical = self.outputs[idx].logical;
+                if self.outputs[idx].configured {
+                    self.resize_surface(idx, logical);
                 }
             }
         }

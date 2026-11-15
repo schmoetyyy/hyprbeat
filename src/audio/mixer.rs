@@ -376,15 +376,13 @@ impl Mixer {
                 *v = 0.0;
             }
 
-            if !paused {
-                if let Some(song_frame) = abs.checked_sub(song_start) {
-                    let idx = song_frame as usize * music_channels;
-                    if idx < music_samples.len() {
-                        // channel map: duplicate mono, truncate stereo→mono
-                        for (c, slot) in frame.iter_mut().take(och).enumerate() {
-                            let src = c.min(music_channels - 1);
-                            *slot += music_samples[idx + src];
-                        }
+            if !paused && let Some(song_frame) = abs.checked_sub(song_start) {
+                let idx = song_frame as usize * music_channels;
+                if idx < music_samples.len() {
+                    // channel map: duplicate mono, truncate stereo→mono
+                    for (c, slot) in frame.iter_mut().take(och).enumerate() {
+                        let src = c.min(music_channels - 1);
+                        *slot += music_samples[idx + src];
                     }
                 }
             }
@@ -428,10 +426,11 @@ impl Mixer {
         }
 
         // 4) song-finished latch (idempotent, cheap)
-        if let Some(m) = music {
-            if !paused && end >= song_start.wrapping_add(m.frames()) {
-                self.finished.store(true, Ordering::Relaxed);
-            }
+        if let Some(m) = music
+            && !paused
+            && end >= song_start.wrapping_add(m.frames())
+        {
+            self.finished.store(true, Ordering::Relaxed);
         }
 
         self.clipped.fetch_add(clipped, Ordering::Relaxed);
