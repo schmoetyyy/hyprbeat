@@ -5,7 +5,7 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-14 (commit-by-commit history audit) — **phase 2
+> **Last updated**: 2026-11-15 (D-41 ruling + library index) — **phase 2
 > DONE** (validation run 2 = 14/14 at `851e68b`, 2026-11-12; optional §3.6
 > spot checks closed 2026-11-13 — numbers + carried items in the appended
 > Phase-2 close-out record, mirrored in §10 row 2). **Phase 3, session 1
@@ -17,11 +17,13 @@
 > `cargo clippy --all-targets -- -D warnings`, `cargo test --lib` = 119
 > passed.
 > **Current phase**: 3 — **IN PROGRESS** (parser + golden corpus done;
-> §10 row 3). Next: commit 3 = library index per §5.2 (XDG dirs I-07,
-> `index.json` D-13, SHA-256 dedup) — open with the D-41 ruling (Q-13
-> known-hash re-import; lean: reference, user has veto). Then `.osz` zip
-> import (§5.2), the timeline visualizer, then phase-3 exit validation on
-> a real user-supplied map + audio (Q-10 rides on it).
+> §10 row 3). D-41 ruled 2026-11-15 (Q-13): known-hash re-import records a
+> REFERENCE to the existing extraction, with an import/load existence
+> check and a repair-from-incoming-bytes path (§9; delete-while-referenced
+> parked as §14 Q-14). Next: commit 3 = library index per §5.2 (XDG dirs
+> I-07, `index.json` D-13, SHA-256 dedup). Then `.osz` zip import (§5.2),
+> the timeline visualizer, then phase-3 exit validation on a real
+> user-supplied map + audio (Q-10 rides on it).
 > 2026-11-14 audit note: this header was six commits stale (it still said
 > phase 2 "awaiting validation run 2" — §13 item 4 had lapsed since
 > `851e68b`). The same pass fixed: the Phase-2 close-out commit chain
@@ -714,6 +716,7 @@ scoring math (§11 I-09), never in the live game.
 | D-38 | **Log-format contract for validation greps** (learned in run 1): tracing-subscriber's default formatter prints non-message string fields Debug-QUOTED (`cache="miss"`) while numbers print bare; and on the dev machine's redirected logs even numeric field greps (`rate=`, `song_ms=`) matched nothing — consistent with ANSI escapes around field names/`=` (verified against tracing-subscriber 0.3.23 source: field name painted italic, `=` painted dimmed). Fixes, in force from now on: (a) log greps in dev scripts must be ANSI-stripped (`sed $'s/\x1b\[[0-9;]*[mK]//g'`) and quote-tolerant (`cache="?miss"?`); (b) string fields we grep for use the `%` Display sigil to print bare (`cache=%(...)` — music decoded line now does); (c) dev scripts print the FULL matched line on extraction failure so misses self-diagnose; (d) phase scripts keep their log dir when anything fails (path printed) | A grep that silently matches nothing turns a passing system into a FAIL with no evidence; run 1 burned a dev-machine round trip on exactly that |
 | D-39 | **`build_stream` ownership: one `Arc` clone per cpal callback closure** (fix for the E0382 that shipped in the 2026-11-13 fix drop). What happened: that drop was edited in a recycled sandbox that could no longer compile (no alsa/xkb headers), so the callback wiring never got borrow-checked — `let shared = shared.clone();` shadowed the `&Arc` param, the `move` data callback consumed the binding, and the error callback's own `let shared = shared.clone();` then borrowed a moved value. Fix in `src/audio/mod.rs`: the data callback captures its own `shared_data` clone; the error callback clones the ORIGINAL param (both callbacks must own an `Arc` — cpal requires `Send + 'static` closures). Process lesson, in force: **a re-delivery that cannot run at least `cargo check --all-targets` in its own sandbox is not verified** — byte-diff, fmt and grep anchors caught nothing here; this time check + fmt + clippy `-D warnings` + `test --lib` (84 passed) all ran green before sending | E0382-class ownership bugs are invisible to byte-comparisons; "awaiting run 2" was actually "run 2 cannot start". One compile gate in the producing sandbox keeps dev-machine round trips single-purpose |
 | D-40 | Phase-3 parser is OUR OWN pure module (`src/beatmap`, §5.1) — **rosu-pp is NOT added**. §4's verify-in-phase-3 done (docs.rs, rosu-pp 4.0.1, checked 2026-11-13): it exposes a calculation-oriented `Beatmap` parsed via `Beatmap::from_path` (file I/O), a port of lazer's difficulty/PP calculators, with no documented old-format lenient parsing, no raw per-object fields (hitSample / edge sounds / combo skip), and no zero-I/O parse satisfying I-09. The game's loader stays dep-free and pure; rosu-pp stays parked as a candidate only for star-rating/PP display (v0.2+, revisit then). | Own parser keeps the tree small (§4), I-09-pure + unit-testable, and the D-07 posture clean; PP calc is not v0.1 scope. |
+| D-41 | Known-hash re-import (Q-13) = **REFERENCE**: if the incoming file's SHA-256 is already indexed and the canonical copy exists, record a reference and write nothing. Import AND load verify the canonical target exists; a missing target is repaired by re-extracting the incoming bytes at the new target and repointing the entry (mandated test). Deleting a canonical extraction while still referenced is out of scope for the library-index commit → §14 Q-14. | §5.2 content addressing + the D-32 hash-keyed decode cache already store identical bytes once; re-extraction is wasted I/O. User-ruled 2026-11-15. |
 
 ---
 
@@ -994,13 +997,21 @@ adds the new one, and updates dependent sections.
   (`.with_ansi(std::io::stderr().is_terminal())` in main.rs) stays listed
   here as a ready hardening — land it before ever trusting raw redirected
   logs for a gate again.
-- **Q-13 (new, 2026-11-14, phase 3)**: known-hash re-import behaviour for
+- **Q-13 (new, 2026-11-14, phase 3)**: ~~known-hash re-import behaviour for
   the library index (commit 3): when an incoming file's SHA-256 is already
   in `index.json`, record a reference to the existing extraction, or
-  re-extract from the new `.osz`? Lean: reference — §5.2 content addressing
-  plus the D-32 hash-addressed decode cache already store identical bytes
-  once; re-extraction is wasted I/O. To be ruled as D-41 with the
-  library-index commit; the user has veto.
+  re-extract from the new `.osz`?~~ **ANSWERED 2026-11-15 — ruled D-41:
+  REFERENCE** (import/load verify the canonical target exists; a missing
+  target is repaired by re-extracting the incoming bytes and repointing
+  the entry — §9 D-41). Deleting a canonical extraction while still
+  referenced is parked as Q-14.
+- **Q-14 (new, 2026-11-15, phase 3, from the D-41 ruling)**: library
+  management (delete / remove-set) is out of scope for v0.1, but the
+  D-41 reference model has one sharp edge to design BEFORE any delete
+  feature exists: deleting a canonical extraction that other sets still
+  reference dangles them. Until designed: the app never deletes stored
+  files; dangling references are detected on index load (reported,
+  entries kept) and repaired on re-import of the same hash (D-41).
 
 ---
 
