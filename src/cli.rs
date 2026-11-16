@@ -63,8 +63,14 @@ phase 5):
         --buffer N          Output buffer in frames — the latency floor of the
                             input→sound budget (§3.6). 0 = device default
                             (measured 32 ms on PipeWire — too big); the engine
-                            falls back to the device default if a fixed size is
-                            refused [default: 256 ≈ 5.3 ms at 48 kHz]
+                            falls back to the device default if the host
+                            refuses a fixed size — sizes not divisible by 4
+                            are refused by ALSA and fall back. Fixed requests
+                            below 512 can drive the PipeWire graph to a
+                            64-frame quantum; with a capture tool already
+                            attached to the output this crackled live playback
+                            on the dev machine — 512 avoids it
+                            [default: 512 ≈ 10.7 ms at 48 kHz]
         --latency-test      Input → sound → photon report (§3.6, §12.3):
                             switch to an EMPTY workspace, click the desktop
                             once for keyboard focus, then TAP keys; every tap
@@ -128,10 +134,14 @@ pub struct Args {
     pub volume: f32,
     /// Universal audio offset in ms (§3.3).
     pub offset_ms: f64,
-    /// Requested output buffer size in frames (D-37). 256 ≈ 5.3 ms at 48 kHz;
-    /// 0 = device default (was 32 ms / 1536 frames on the dev machine — the
-    /// §3.6 input→sound budget busts with that). 16–8192 clamped; the engine
-    /// falls back to the device default if the host refuses a fixed size.
+    /// Requested output buffer size in frames (D-37, amended 2026-11-16:
+    /// default 512 ≈ 10.7 ms at 48 kHz); 0 = device default (was 32 ms /
+    /// 1536 frames on the dev machine — the §3.6 input→sound budget busts
+    /// with that). 16–8192 clamped; the engine falls back to the device
+    /// default if the host refuses a fixed size (ALSA refuses sizes not
+    /// divisible by 4). Below 512 the PipeWire graph can drop to a
+    /// 64-frame quantum — see `audio::DEFAULT_BUFFER_FRAMES` for the
+    /// crackle finding and the startup warn.
     pub buffer_frames: u32,
     pub help: bool,
     pub version: bool,
@@ -474,9 +484,9 @@ mod tests {
 
     #[test]
     fn buffer_flag_defaults_and_parses() {
-        // default: 256 (D-37)
+        // default: 512 (D-37 amendment, 2026-11-16 — was 256)
         let a = args(&["--audio", "x.wav"]).unwrap();
-        assert_eq!(a.buffer_frames, 256);
+        assert_eq!(a.buffer_frames, 512);
         // explicit values pass through, 0 = device default
         assert_eq!(args(&["--buffer", "128"]).unwrap().buffer_frames, 128);
         assert_eq!(args(&["--buffer", "0"]).unwrap().buffer_frames, 0);

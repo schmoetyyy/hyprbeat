@@ -223,6 +223,18 @@ pub enum ImportMode {
     Unsubmitted { hash8: String },
 }
 
+impl ImportMode {
+    /// The library set-key (D-45): `<set-id>` or `unsubmitted/<hash8>` —
+    /// the same string that routes the target paths, keys the set
+    /// manifest and names the set in the log line. One source of truth.
+    pub fn set_key(&self) -> String {
+        match self {
+            Self::Submitted { set_id } => set_id.to_string(),
+            Self::Unsubmitted { hash8 } => format!("unsubmitted/{hash8}"),
+        }
+    }
+}
+
 /// Why an archive entry was skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
@@ -468,8 +480,25 @@ pub fn import_osz<R: Read + Seek>(
         files.push(out);
     }
 
+    // ---- D-45: record the set manifest ----------------------------------
+    // EVERY kept entry, deduped or not: after a cross-set dedup this is
+    // the only record that set B "owns" a file whose canonical copy
+    // lives in set A's directory. Entry names are unique (the
+    // duplicate-target check hard-failed otherwise) and the manifest
+    // replaces the set's previous one wholesale (the D-42 posture — the
+    // .osz is the source of truth for its own set).
+    let set_key = mode.set_key();
+    let mut manifest_entries: BTreeMap<String, String> = BTreeMap::new();
+    for (k, out) in kept.iter().zip(files.iter()) {
+        manifest_entries.insert(k.rel.clone(), out.hash.clone());
+    }
+    let manifest_changed = index.record_set_manifest(&set_key, manifest_entries);
+
     // ---- save once, only when mutated ----------------------------------
-    let index_saved = stored > 0 || repaired > 0;
+    // A manifest-only change saves too (a v1-era index heals on the
+    // first re-import); a pure re-import of known bytes with an
+    // unchanged manifest still saves nothing (test-pinned).
+    let index_saved = stored > 0 || repaired > 0 || manifest_changed;
     if index_saved {
         index.save(paths)?;
     }
@@ -517,10 +546,7 @@ pub fn run_cli(osz_path: &Path, library_root: Option<&Path>) -> Result<ImportRep
 /// warn line per repair or D-42 displacement (state the library healed),
 /// and one grep-able summary line for the validation script.
 fn log_report(report: &ImportReport) {
-    let set = match &report.mode {
-        ImportMode::Submitted { set_id } => set_id.to_string(),
-        ImportMode::Unsubmitted { hash8 } => format!("unsubmitted/{hash8}"),
-    };
+    let set = report.mode.set_key();
     for s in &report.skipped {
         tracing::info!(name = %s.name, reason = %s.reason, "osz import: skipped entry");
     }
@@ -1162,6 +1188,164 @@ mod tests {
         // nothing was created — fail-before-write posture extends to the
         // wrapper: the root does not even gain songs/ or index.json
         assert!(!base.join("index.json").exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- D-45: per-set manifests -----------------------------------------
+
+    #[test]
+    fn manifest_records_every_kept_entry() {
+        let base = tmpdir("manifest-all-entries");
+        let paths = paths_from(&base);
+        let audio: &[u8] = b"manifest-fixture-audio";
+        let map = osu("777", "Manifest");
+        let report = import(
+            zip_bytes(&[
+                ("map.osu", &map),
+                ("audio.wav", audio),
+                ("video.mp4", b"skipped"),
+            ]),
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(report.stored, 2);
+        let (index, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert!(dangling.is_empty());
+        let manifest = index.sets().get("777").expect("manifest for set 777");
+        // kept entries only — the skipped video never enters the manifest
+        assert_eq!(manifest.entries.len(), 2);
+        assert_eq!(manifest.entries.get("map.osu"), Some(&report.files[0].hash));
+        assert_eq!(
+            manifest.entries.get("audio.wav"),
+            Some(&report.files[1].hash)
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn cross_set_dedup_keeps_set_b_resolvable() {
+        // The D-45 headline: set 222's audio dedups into set 111's copy
+        // (D-41) — no songs/222/audio.wav on disk — yet 222's manifest
+        // maps the entry to the shared hash and resolve_set lands on
+        // 111's canonical path. A v1 index could not answer this.
+        let base = tmpdir("cross-set-dedup");
+        let paths = paths_from(&base);
+        let audio: &[u8] = b"shared-audio-bytes";
+        let first = import(
+            zip_bytes(&[("a.osu", &osu("111", "A")), ("audio.wav", audio)]),
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(first.stored, 2);
+        let second = import(
+            zip_bytes(&[("b.osu", &osu("222", "B")), ("audio.wav", audio)]),
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(second.stored, 1); // b.osu only — the audio deduped
+        assert_eq!(second.deduped, 1);
+        // dedup never writes: 222's dir holds the .osu but not the audio
+        assert!(paths.songs_dir.join("222/b.osu").exists());
+        assert!(!paths.songs_dir.join("222/audio.wav").exists());
+        // the manifest keeps 222 fully resolvable, across the dedup
+        let (index, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert!(dangling.is_empty());
+        let resolved = index.resolve_set("222", &paths);
+        assert_eq!(
+            resolved.get("audio.wav").unwrap(),
+            &paths.songs_dir.join("111/audio.wav")
+        );
+        assert_eq!(
+            resolved.get("b.osu").unwrap(),
+            &paths.songs_dir.join("222/b.osu")
+        );
+        // and the resolved audio carries the shared bytes
+        assert_eq!(
+            fs::read(paths.songs_dir.join("111/audio.wav")).unwrap(),
+            audio
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn manifest_change_alone_saves_the_index() {
+        // The D-45 heal: a v1-era index (no manifests) + an all-dedup
+        // re-import → stored=0, repaired=0, but the manifest changed →
+        // index_saved=true and the on-disk file becomes v2. The next
+        // re-import changes nothing → no save, byte-identical.
+        let base = tmpdir("manifest-heal");
+        let paths = paths_from(&base);
+        let audio: &[u8] = b"heal-audio-bytes";
+        let map = osu("555", "Heal");
+        let archive = zip_bytes(&[("map.osu", &map), ("audio.wav", audio)]);
+        let first = import(archive.clone(), &paths).unwrap();
+        assert!(first.index_saved);
+
+        // Regress the index to the v1 shape an old binary would leave
+        // (same files map, no sets, version 1).
+        let mut files = serde_json::Map::new();
+        for (out, size) in first.files.iter().zip([map.len(), audio.len()]) {
+            files.insert(
+                out.hash.clone(),
+                serde_json::json!({"path": out.path, "size": size}),
+            );
+        }
+        let v1 = serde_json::json!({"version": 1, "files": files}).to_string();
+        fs::write(&paths.index_file, v1).unwrap();
+
+        // all-dedup re-import over the v1 index: manifest-only change
+        let second = import(archive.clone(), &paths).unwrap();
+        assert_eq!(second.stored, 0);
+        assert_eq!(second.deduped, 2);
+        assert_eq!(second.repaired, 0);
+        assert!(second.index_saved, "a manifest-only change must save");
+        let raw = fs::read_to_string(&paths.index_file).unwrap();
+        assert!(raw.contains("\"version\": 2"));
+        assert!(raw.contains("\"sets\""));
+
+        // third import: nothing changes → no save, byte-identical
+        let before = fs::read(&paths.index_file).unwrap();
+        let third = import(archive, &paths).unwrap();
+        assert!(!third.index_saved);
+        assert_eq!(fs::read(&paths.index_file).unwrap(), before);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn update_reimport_rewrites_the_manifest() {
+        // D-42 + D-45: an update re-import (same set, NEW audio bytes)
+        // displaces the old hash; the wholesale-replace manifest must
+        // follow the new bytes — the entry never points at the displaced
+        // hash.
+        let base = tmpdir("manifest-rewrite");
+        let paths = paths_from(&base);
+        let map = osu("321", "Update");
+        let old_audio: &[u8] = b"audio-version-one";
+        let new_audio: &[u8] = b"audio-version-two!";
+        import(
+            zip_bytes(&[("map.osu", &map), ("audio.wav", old_audio)]),
+            &paths,
+        )
+        .unwrap();
+        let second = import(
+            zip_bytes(&[("map.osu", &map), ("audio.wav", new_audio)]),
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(second.stored, 1);
+        assert_eq!(second.replaced, 1); // D-42 displacement
+        assert!(second.index_saved);
+        let (index, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert!(dangling.is_empty());
+        let manifest = index.sets().get("321").expect("manifest for 321");
+        assert_eq!(manifest.entries.len(), 2);
+        assert_eq!(
+            manifest.entries.get("audio.wav"),
+            Some(&sha256_hex(new_audio))
+        );
+        // resolve lands on the NEW bytes
+        let resolved = index.resolve_set("321", &paths);
+        assert_eq!(fs::read(resolved["audio.wav"].clone()).unwrap(), new_audio);
         fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -175,8 +175,23 @@ impl AudioEngine {
         } else {
             "device default".to_string()
         };
+        // D-37 amendment: warn when the EFFECTIVE fixed request is below
+        // the 512-frame quantum-clean threshold. Only on the fixed path —
+        // a refused request takes the fallback below (device default =
+        // the large-period regime, not the small-quantum one). Tool-
+        // neutral wording on purpose; one machine, [REVISITABLE] (see
+        // DEFAULT_BUFFER_FRAMES for the findings).
+        let small_fixed = requested_fixed && small_fixed_request(opts.buffer_frames);
         let stream = match build_stream(&device, &config, &mixer, &shared, out_channels) {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                if small_fixed {
+                    tracing::warn!(
+                        requested = opts.buffer_frames,
+                        "fixed buffers below 512 frames can drive the PipeWire graph to a 64-frame quantum, and when a capture tool is already attached to the output, this may cause intermittent live crackle on some systems; consider --buffer 512 (D-37)"
+                    );
+                }
+                stream
+            }
             Err(err) if requested_fixed => {
                 tracing::warn!(
                     requested = opts.buffer_frames,
@@ -330,13 +345,46 @@ fn load_hitsounds(rate: u32) -> Result<Vec<HitSound>, AudioStartError> {
 /// Default master volume (§6 `[general] volume`; config lands in phase 5).
 pub const DEFAULT_VOLUME: f32 = 0.7;
 
-/// Default output buffer in frames (D-37). Dev-machine measurement
-/// 2026-11-13: the device default was 1536 frames @ 48 kHz = 32 ms period —
-/// the §3.6 input→sound budget (p95 audible ≤ 25 ms) cannot fit inside a
-/// 32 ms period, so we request 256 frames (≈ 5.3 ms @ 48 kHz, ≈ 5.8 ms @
-/// 44.1 kHz) and fall back to the device default if the host refuses
-/// (`--buffer 0` forces the old behavior; `--buffer N` tunes).
-pub const DEFAULT_BUFFER_FRAMES: u32 = 256;
+/// Default output buffer in frames (D-37, amended 2026-11-16: 256 → 512).
+///
+/// Why a small fixed buffer at all (2026-11-13, unchanged): the device
+/// default measured 1536 frames @ 48 kHz = 32 ms period — the §3.6
+/// input→sound budget (p95 audible ≤ 25 ms) cannot fit inside a 32 ms
+/// period. We request a fixed size and fall back to the device default
+/// if the host refuses (`--buffer 0` forces the device default;
+/// `--buffer N` tunes).
+///
+/// Why 512 and not 256 (amendment; measured on ONE machine, PipeWire
+/// 1.6.11, [REVISITABLE]): requesting 256 or 384 frames drove the
+/// PipeWire graph to a 64-frame quantum, and with a capture tool
+/// already attached to the output (order-dependent: tap first, stream
+/// second) the LIVE output crackled intermittently — on both the IEC958
+/// and the analog sink; captured audio stayed clean throughout and
+/// pw-top ERR stayed flat. Without a tap attached, quantum 64 did not
+/// crackle in uncontrolled runs. 512 and above ran the graph at quantum
+/// 128 and stayed clean. 384 and below crackled, 512 and above clean —
+/// no threshold between 384 and 512 is claimed as measured (416/448/480
+/// untested; 385/399 and friends are refused by ALSA outright —
+/// `Invalid argument` — and fall back to the device default). 512 is
+/// the smallest request the quantum model derives as clean: the graph
+/// quantum tracked the greatest power of two ≤ N/4 for the small sizes
+/// (256/384 → 64), while 512/768/1024 all ran at 128. Latency stays
+/// inside budget at both rates: 512 ≈ 10.7 ms @ 48 kHz / 11.6 ms @
+/// 44.1 kHz if a host honored the request literally; on the dev machine
+/// PipeWire negotiated a 2.67 ms callback period (tap→sound p50 4.14 /
+/// p95 5.17 ms — Q-9 estimates, PASS).
+pub const DEFAULT_BUFFER_FRAMES: u32 = 512;
+
+/// D-37 amendment: does this fixed-buffer request sit below the 512-frame
+/// warn threshold? 512 is the smallest request that kept the PipeWire
+/// graph at a 128-frame quantum on the dev machine (256/384 → 64;
+/// one machine, [REVISITABLE] — see [`DEFAULT_BUFFER_FRAMES`]). 0 never
+/// warns (device default); only non-zero requests below 512 do. The
+/// predicate is pure so the threshold is unit-pinned; the default equals
+/// the threshold by construction (asserted in the tests below).
+fn small_fixed_request(buffer_frames: u32) -> bool {
+    buffer_frames > 0 && buffer_frames < 512
+}
 
 // ---------------------------------------------------------------------------
 // tests (config selection math is pure enough to pin without a device)
@@ -353,15 +401,47 @@ mod tests {
 
     #[test]
     fn default_buffer_fits_latency_budget() {
-        // D-37: 256 frames must stay well under the §3.6 25 ms audible
-        // budget at both common rates (two periods must fit with room for
-        // the tap-to-mixed leg).
+        // D-37: the default must stay well inside the §3.6 25 ms audible
+        // budget at both common rates.
+        //
+        // OLD bound (2026-11-13, default 256): period_ms < 7.0 — the fear
+        // was a host HONORING the request literally (256 ≈ 5.3/5.8 ms),
+        // and two periods had to fit under 25 ms with room for the
+        // tap→mixed leg.
+        //
+        // NEW bound (2026-11-16 amendment, default 512): period_ms < 12.5
+        // — HALF the 25 ms budget. One full buffer period plus the
+        // measured tap→mixed leg (~1.3 ms) must still fit under 25 ms
+        // even if a host honors 512 literally (512 ≈ 10.7 ms @ 48 kHz /
+        // 11.6 ms @ 44.1 kHz — both pass). On the dev machine's PipeWire
+        // the negotiated geometry is far smaller (callback period
+        // 2.67 ms, tap→sound p95 5.17 ms — Q-9 estimates, PASS); 512 was
+        // chosen for the quantum/crackle finding, not for latency.
         for rate in [44_100, 48_000] {
             let period_ms = DEFAULT_BUFFER_FRAMES as f64 * 1000.0 / rate as f64;
             assert!(
-                period_ms < 7.0,
-                "buffer period at {rate} Hz is {period_ms:.2} ms — too large"
+                period_ms < 12.5,
+                "buffer period at {rate} Hz is {period_ms:.2} ms — over half the §3.6 budget"
             );
+        }
+    }
+
+    #[test]
+    fn small_fixed_request_threshold_is_512() {
+        // D-37 amendment ruling (2026-11-16): the warn threshold is 512
+        // and the default IS the threshold. Literal 512s on purpose —
+        // moving either number is a re-ruling and must update this test.
+        assert_eq!(DEFAULT_BUFFER_FRAMES, 512);
+        // 0 = device-default request (no fixed request, no warn);
+        // 16..=511 = small fixed request (warn) — including the values
+        // that measured dirty (256, 384) and the model-dirty untested
+        // ones (416/448/480: a quarter of each still rounds down to a
+        // 64-frame quantum); 512 and above = quantum-clean (no warn).
+        for clean in [0u32, 512, 768, 1024, 8192] {
+            assert!(!small_fixed_request(clean), "{clean} must not warn");
+        }
+        for small in [16u32, 256, 384, 416, 448, 480, 511] {
+            assert!(small_fixed_request(small), "{small} must warn");
         }
     }
 

@@ -5,7 +5,8 @@
 //! ```text
 //! ~/.local/share/hyprbeat/
 //!     songs/<set-id>/…     # extracted files; canonical copies
-//!     index.json           # sha256 → { canonical path, size } (D-13, v1)
+//!     index.json           # v2 (D-13/D-45): sha256 → {path, size} +
+//!                           # sets: set-key → entry-name → sha256
 //! ```
 //!
 //! Import flow (§5.2): hash the incoming bytes; if the hash is already
@@ -15,6 +16,14 @@
 //! the entry (repair); otherwise store the bytes and add the entry.
 //! Identical bytes are therefore stored exactly once — the library-side
 //! mirror of the D-32 hash-keyed decode cache.
+//!
+//! Per-set manifests (D-45): every import also records the set's
+//! entry-name → sha256 mapping for EVERY kept entry (deduped or not) —
+//! after a cross-set dedup this manifest is the only record that set B
+//! "owns" a file whose canonical copy lives in set A's directory. A v1
+//! index (pre-manifest) reads as v2-with-empty-`sets`
+//! ([`LibraryIndex::load`]); loaders go through
+//! [`LibraryIndex::resolve_set`].
 //!
 //! Update re-imports (D-42): hash-UNKNOWN bytes aimed at a path another
 //! entry still claims (same set-id + entry name, different bytes) displace
@@ -109,9 +118,18 @@ impl std::error::Error for LibraryError {
     }
 }
 
-/// `index.json` schema version. Bumped only with a migration story; an
-/// index written by a newer schema is refused (fail-safe), not guessed at.
-pub const INDEX_VERSION: u32 = 1;
+/// `index.json` schema version (D-45: v2 adds per-set manifests). Bumped
+/// only with a migration story; an index written by a newer schema is
+/// refused (fail-safe), not guessed at. A v1 index is READ as
+/// v2-with-empty-`sets` ([`LibraryIndex::load`]); the reverse direction
+/// is deliberately unsupported — an old binary cannot read a v2 index
+/// (its version check refuses), so the binary upgrades first, the index
+/// follows on its next save.
+pub const INDEX_VERSION: u32 = 2;
+
+/// The schema version read leniently (D-45 migration): a v1 index parses
+/// as v2-with-empty-`sets` and upgrades in memory; see [`LibraryIndex::load`].
+pub const INDEX_VERSION_V1: u32 = 1;
 
 /// One stored file: the canonical copy under `songs/` (D-41: identical
 /// bytes live once; other imports of the same hash reference this entry).
@@ -124,13 +142,33 @@ pub struct IndexEntry {
     pub size: u64,
 }
 
-/// The library index (`index.json`, D-13 schema v1). Keys are lowercase-hex
-/// SHA-256 digests. [`std::collections::BTreeMap`] keeps the serialized
-/// file deterministic (stable diffs, stable tests).
+/// One set's manifest (D-45): entry name → content hash for every file
+/// the importer kept (deduped or not). This is the piece v1 could not
+/// represent — after a cross-set dedup the `files` map alone cannot answer
+/// "which files belong to this set" (the requesting set's name→hash
+/// mapping was lost at dedup time), so loaders resolve
+/// set → manifest → hashes → canonical paths
+/// ([`LibraryIndex::resolve_set`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetManifest {
+    /// Entry name (the importer's normalized songs-relative name inside
+    /// the set directory) → lowercase-hex SHA-256 of the stored bytes.
+    pub entries: BTreeMap<String, String>,
+}
+
+/// The library index (`index.json`, D-13 schema v2). `files` keys are
+/// lowercase-hex SHA-256 digests; `sets` keys are set-keys (`<set-id>` or
+/// `unsubmitted/<hash8>`, the D-43 routing keys).
+/// [`std::collections::BTreeMap`] keeps the serialized file deterministic
+/// (stable diffs, stable tests).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryIndex {
     version: u32,
     files: BTreeMap<String, IndexEntry>,
+    /// Per-set manifests (D-45). `#[serde(default)]` so a v1 index —
+    /// written before manifests existed — parses with an empty map.
+    #[serde(default)]
+    sets: BTreeMap<String, SetManifest>,
 }
 
 impl Default for LibraryIndex {
@@ -140,6 +178,7 @@ impl Default for LibraryIndex {
         Self {
             version: INDEX_VERSION,
             files: BTreeMap::new(),
+            sets: BTreeMap::new(),
         }
     }
 }
@@ -182,11 +221,25 @@ impl LibraryIndex {
             path: file.clone(),
             source: e,
         })?;
-        let parsed: Self = serde_json::from_slice(&bytes).map_err(|e| LibraryError::Corrupt {
-            path: file.clone(),
-            reason: format!("JSON: {e}"),
-        })?;
-        if parsed.version != INDEX_VERSION {
+        let mut parsed: Self =
+            serde_json::from_slice(&bytes).map_err(|e| LibraryError::Corrupt {
+                path: file.clone(),
+                reason: format!("JSON: {e}"),
+            })?;
+        if parsed.version == INDEX_VERSION_V1 {
+            // D-45: a v1 index reads as v2-with-empty-`sets`. The upgrade
+            // happens IN MEMORY only (this load never writes); the next
+            // save — which only happens once the index mutates — stamps
+            // v2. Re-importing the .osz files rebuilds the manifests for
+            // free (D-41 dedup stores nothing). An old binary reading a
+            // v2 index still fails its own version check — the
+            // compatibility is one-directional on purpose (D-13
+            // fail-safe).
+            tracing::warn!(
+                "library index is schema v1 (pre-D-45): no per-set manifests — re-import your .osz files to rebuild them (dedup makes that free); the index becomes v2 on its next save"
+            );
+            parsed.version = INDEX_VERSION;
+        } else if parsed.version != INDEX_VERSION {
             return Err(LibraryError::Corrupt {
                 path: file.clone(),
                 reason: format!(
@@ -368,9 +421,67 @@ impl LibraryIndex {
         &self.files
     }
 
-    /// The schema version this index was written with.
+    /// The schema version this index was written with. A v1 file reports
+    /// [`INDEX_VERSION`] here already — the in-memory upgrade happened at
+    /// load; the DISK file keeps its old bytes until the next save.
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// All set manifests, keyed by set-key (D-45). A v1-loaded index has
+    /// an empty map until its sets are re-imported.
+    pub fn sets(&self) -> &BTreeMap<String, SetManifest> {
+        &self.sets
+    }
+
+    /// Record one set's manifest (D-45), WHOLESALE: the `.osz` is the
+    /// source of truth for its own set, so a re-import replaces the
+    /// manifest outright (the D-42 replace posture applied to manifests —
+    /// a merge could keep entries the new archive no longer ships).
+    /// Entry names are unique per import (the duplicate-target check
+    /// refuses collisions before the store pass). Returns whether the
+    /// index changed — the importer folds this into its save decision.
+    pub fn record_set_manifest(
+        &mut self,
+        set_key: &str,
+        entries: BTreeMap<String, String>,
+    ) -> bool {
+        let manifest = SetManifest { entries };
+        if self.sets.get(set_key) == Some(&manifest) {
+            return false;
+        }
+        self.sets.insert(set_key.to_string(), manifest);
+        true
+    }
+
+    /// Resolve a set's entries to canonical paths (D-45):
+    /// set → manifest → hashes → `files` entries → `songs_dir`-joined
+    /// paths. Works across dedups: an entry whose canonical bytes live in
+    /// ANOTHER set's directory resolves to that copy. Entries whose hash
+    /// is missing from `files` (a stale manifest — e.g. a D-42
+    /// displacement elsewhere removed the record) are skipped with a
+    /// warn, never fatal; re-importing the set heals the manifest. An
+    /// unknown set-key yields an empty map.
+    pub fn resolve_set(&self, set_key: &str, paths: &LibraryPaths) -> BTreeMap<String, PathBuf> {
+        let mut out = BTreeMap::new();
+        let Some(manifest) = self.sets.get(set_key) else {
+            return out;
+        };
+        for (name, hash) in &manifest.entries {
+            match self.files.get(hash) {
+                Some(entry) => {
+                    out.insert(name.clone(), paths.songs_dir.join(&entry.path));
+                }
+                None => {
+                    tracing::warn!(
+                        set = %set_key,
+                        entry = %name,
+                        "library index: manifest entry has no file record (stale manifest?) — skipped; re-import the set to heal (D-45)"
+                    );
+                }
+            }
+        }
+        out
     }
 }
 
@@ -730,6 +841,144 @@ mod tests {
         assert_eq!(
             fs::read(paths.songs_dir.join("100/audio.mp3")).unwrap(),
             BYTES_B
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- D-45: schema v2, per-set manifests, v1-reads-as-v2 -------------
+
+    #[test]
+    fn v1_index_reads_as_v2_with_empty_sets() {
+        // D-45 migration, load side: a v1 index (pre-manifest) parses as
+        // v2-with-empty-`sets`, upgrades to v2 IN MEMORY (the next save
+        // writes v2), and the load itself leaves the file byte-identical.
+        // The reverse is false on purpose: an OLD binary cannot read a v2
+        // index (its version check refuses) — upgrade the binary first.
+        let base = tmpdir("v1-reads-as-v2");
+        let paths = paths_from(&base);
+        let hash = sha256_hex(BYTES_A);
+        let mut files = serde_json::Map::new();
+        files.insert(
+            hash.clone(),
+            serde_json::json!({"path": "123/audio.mp3", "size": BYTES_A.len()}),
+        );
+        let v1 = serde_json::json!({"version": 1, "files": files}).to_string();
+        fs::create_dir_all(paths.songs_dir.join("123")).unwrap();
+        fs::write(paths.songs_dir.join("123/audio.mp3"), BYTES_A).unwrap();
+        fs::write(&paths.index_file, &v1).unwrap();
+
+        let (index, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert!(dangling.is_empty());
+        assert_eq!(index.version(), INDEX_VERSION, "upgraded in memory");
+        assert!(index.sets().is_empty());
+        assert_eq!(index.lookup(&hash).unwrap().path, "123/audio.mp3");
+        // the load itself never rewrote the v1 file
+        assert_eq!(fs::read_to_string(&paths.index_file).unwrap(), v1);
+
+        // a save (which only happens on mutation) now writes v2 + sets
+        index.save(&paths).unwrap();
+        let raw = fs::read_to_string(&paths.index_file).unwrap();
+        assert!(raw.contains("\"version\": 2"));
+        assert!(raw.contains("\"sets\": {}"));
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn v2_round_trip_with_manifests() {
+        let base = tmpdir("v2-roundtrip");
+        let paths = paths_from(&base);
+        let mut index = LibraryIndex::default();
+        let a = index.store_file(BYTES_A, "100/a.mp3", &paths).unwrap();
+        let b = index.store_file(BYTES_B, "100/b.osu", &paths).unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("a.mp3".to_string(), a.hash.clone());
+        entries.insert("b.osu".to_string(), b.hash.clone());
+        assert!(index.record_set_manifest("100", entries.clone()));
+        // re-recording the identical manifest is a no-op — this feeds the
+        // "save only when mutated" decision
+        assert!(!index.record_set_manifest("100", entries));
+        index.save(&paths).unwrap();
+        let (reloaded, dangling) = LibraryIndex::load(&paths).unwrap();
+        assert!(dangling.is_empty());
+        assert_eq!(reloaded, index);
+        assert_eq!(reloaded.version(), INDEX_VERSION);
+        assert_eq!(reloaded.sets()["100"].entries.len(), 2);
+        assert_eq!(reloaded.sets()["100"].entries["a.mp3"], a.hash);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn schema_versions_other_than_1_and_2_are_refused() {
+        // D-13/D-45: v2 is the only writer, v1 is read-as-v2; everything
+        // else (0, 3, 99, …) is a hard Corrupt and the file stays
+        // byte-identical (no wipe, no rewrite).
+        let base = tmpdir("version-refusal");
+        let paths = paths_from(&base);
+        fs::create_dir_all(&paths.songs_dir).unwrap();
+        let cases: [&[u8]; 3] = [
+            br#"{"version":0,"files":{}}"#,
+            br#"{"version":3,"files":{}}"#,
+            br#"{"version":99,"files":{}}"#,
+        ];
+        for raw in cases {
+            fs::write(&paths.index_file, raw).unwrap();
+            let err = LibraryIndex::load(&paths).unwrap_err();
+            assert!(matches!(&err, LibraryError::Corrupt { .. }), "got {err:?}");
+            assert_eq!(fs::read(&paths.index_file).unwrap(), raw);
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn resolve_set_maps_entries_to_canonical_paths() {
+        // Cross-set dedup geometry at the index level (the D-45 headline):
+        // set 300's manifest points at bytes whose canonical copy lives in
+        // set 100 — resolve lands on 100's path, not 300's.
+        let base = tmpdir("resolve-set");
+        let paths = paths_from(&base);
+        let mut index = LibraryIndex::default();
+        let a = index.store_file(BYTES_A, "100/audio.mp3", &paths).unwrap();
+        let b = index.store_file(BYTES_B, "200/map.osu", &paths).unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("audio.mp3".to_string(), a.hash.clone());
+        entries.insert("map.osu".to_string(), b.hash.clone());
+        index.record_set_manifest("300", entries);
+        let resolved = index.resolve_set("300", &paths);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            resolved.get("audio.mp3").unwrap(),
+            &paths.songs_dir.join("100/audio.mp3")
+        );
+        assert_eq!(
+            resolved.get("map.osu").unwrap(),
+            &paths.songs_dir.join("200/map.osu")
+        );
+        // unknown set-key: empty, not an error (a v1-loaded index has no
+        // manifests at all)
+        assert!(index.resolve_set("999", &paths).is_empty());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn resolve_set_skips_entries_missing_from_files() {
+        // A stale manifest entry (hash absent from `files` — e.g. a D-42
+        // displacement elsewhere removed the record) is skipped with a
+        // warn, never fatal; its resolvable sibling still resolves.
+        // Re-importing the set heals the manifest.
+        let base = tmpdir("resolve-skip");
+        let paths = paths_from(&base);
+        let mut index = LibraryIndex::default();
+        let a = index.store_file(BYTES_A, "100/a.mp3", &paths).unwrap();
+        let ghost = sha256_hex(BYTES_B); // hash of bytes never stored
+        let mut entries = BTreeMap::new();
+        entries.insert("a.mp3".to_string(), a.hash.clone());
+        entries.insert("ghost.mp3".to_string(), ghost);
+        index.record_set_manifest("100", entries);
+        let resolved = index.resolve_set("100", &paths);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved.get("a.mp3").unwrap(),
+            &paths.songs_dir.join("100/a.mp3")
         );
         fs::remove_dir_all(&base).unwrap();
     }

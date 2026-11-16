@@ -739,4 +739,135 @@ mod tests {
         m.mix_into(&mut out, 0, 1);
         assert_eq!(out[0], 0.0);
     }
+
+    #[test]
+    fn variable_callback_sizes_render_bit_identical() {
+        // C.3 (2026-11-16): the mixer must render the SAME samples for the
+        // SAME event schedule regardless of how the host slices the
+        // timeline into callbacks. Positions inside mix_into are absolute
+        // (music reads the counter minus song_start; a voice starts at
+        // max(due, callback_start)), so chunking must be invisible. This
+        // test is the cheap correctness pin, NOT the crackle suspect —
+        // the 2026-11 static investigation traced that to the host /
+        // capture-tool side (D-37 amendment).
+        //
+        // Geometry under test: one continuous 1000-frame callback vs the
+        // two real-world patterns observed on the dev machine —
+        // alternating 117/118 (44.1 kHz mp3, fpc ≈ N/4; 60-frame tail)
+        // and alternating 64/128 (quantum 64; 40-frame tail). Event dues
+        // sit ON chunk boundaries of both patterns (0/64/117/235/470/940)
+        // and mid-chunk (384/700) to pin the activation edge: an event
+        // due exactly at a boundary fires in the NEXT chunk at its own
+        // due position — never late, never twice. One LONG voice (due
+        // 700, 200 samples) spans several chunks in both patterns to
+        // pin voice-state persistence across callbacks.
+        //
+        // The schedule never has two voices live at once — deliberately.
+        // Under chunking, a played-out voice frees its slot before later
+        // events activate, so later events reuse EARLIER slots; the
+        // continuous render assigns every slot up front. With overlapping
+        // voices that reorders the f32 accumulation (music + a + b vs
+        // music + b + a) — commutative in exact math, NOT bit-commutative
+        // in f32 (found while writing this test; ~1 ulp, inaudible, no
+        // RT-path change warranted). Single-live-voice frames are
+        // order-free, which keeps this test exact instead of
+        // tolerance-based.
+        //
+        // Out of scope by design: per-callback RMS/envelope (defined per
+        // callback), frames_per_callback (the last chunk's value), and
+        // >8 concurrent voices (MAX_VOICES exhaustion is a separate RT
+        // property).
+        const FRAMES: u64 = 1000;
+
+        // deterministic stereo music with a clip-hot region (400..600):
+        // hot + a full-gain hit exceeds 1.0 (clips), the cold region
+        // never does — the clip counter is part of the invariance
+        let music_samples: Vec<f32> = (0..FRAMES)
+            .flat_map(|f| {
+                let base = if (400..600).contains(&f) { 0.9 } else { 0.3 };
+                let wiggle = (f % 13) as f32 / 13.0 * 0.2;
+                [base - wiggle, base + wiggle * 0.5]
+            })
+            .collect();
+        // sound 0: a short 24-sample hit peaking at 0.35; sound 1: a long
+        // 200-sample ramp peaking at 0.35 (the chunk-spanning voice)
+        let make_sounds = || {
+            vec![
+                HitSound {
+                    samples: Arc::from(
+                        (0..24u32)
+                            .map(|i| 0.35 * i as f32 / 24.0)
+                            .collect::<Vec<_>>(),
+                    ),
+                },
+                HitSound {
+                    samples: Arc::from(
+                        (0..200u32)
+                            .map(|i| 0.35 * i as f32 / 200.0)
+                            .collect::<Vec<_>>(),
+                    ),
+                },
+            ]
+        };
+        // (due, sound index, 8.8 gain; 256 = 1.0); tag = u16::MAX so no
+        // latency-tap stamping interferes
+        let events: &[(u64, u8, u16)] = &[
+            (0, 0, 256),
+            (64, 0, 192),
+            (117, 0, 256),
+            (235, 0, 256),
+            (384, 0, 192),
+            (470, 0, 256),
+            (700, 1, 256), // the long voice: 700..900, spans chunks
+            (940, 0, 256),
+        ];
+
+        // Render FRAMES frames through the given chunk sizes: fresh mixer
+        // each call (same music bytes, same sounds, same pre-pushed
+        // schedule), song_start = 0, default volume 1.0. Returns the full
+        // interleaved buffer, the RT diagnostics and the finished latch.
+        let render = |chunks: &[u64]| -> (Vec<f32>, (u32, u32, u32), bool) {
+            let shared = Arc::new(SharedClock::new());
+            shared.song_start.store(0, Ordering::Relaxed);
+            let music = Music {
+                samples: Arc::from(music_samples.clone()),
+                channels: 2,
+            };
+            let mixer = Mixer::new(shared.clone(), Some(music), make_sounds(), 2);
+            for &(due, sound, gain) in events {
+                assert!(mixer.fire(SoundEvent {
+                    due,
+                    sound,
+                    gain,
+                    tag: u16::MAX,
+                }));
+            }
+            let mut out = vec![0.0f32; FRAMES as usize * 2];
+            let mut start = 0u64;
+            for &frames in chunks {
+                let s = start as usize * 2;
+                mixer.mix_into(&mut out[s..s + frames as usize * 2], start, frames);
+                shared.samples.fetch_add(frames, Ordering::Relaxed);
+                start += frames;
+            }
+            assert_eq!(start, FRAMES, "chunk sizes must sum to FRAMES");
+            (out, mixer.diagnostics(), mixer.finished())
+        };
+
+        let continuous = render(&[FRAMES]);
+        let alt_117_118 = render(&[117, 118, 117, 118, 117, 118, 117, 118, 60]);
+        let alt_64_128 = render(&[64, 128, 64, 128, 64, 128, 64, 128, 64, 128, 40]);
+
+        // bit-identical audio across all three chunkings
+        assert_eq!(alt_117_118.0, continuous.0);
+        assert_eq!(alt_64_128.0, continuous.0);
+        // identical RT diagnostics — and the paths actually exercised
+        assert_eq!(alt_117_118.1, continuous.1);
+        assert_eq!(alt_64_128.1, continuous.1);
+        assert_eq!(continuous.1.0, 0, "no events dropped");
+        assert_eq!(continuous.1.1, 0, "no voices exhausted");
+        assert!(continuous.1.2 > 0, "the clip-hot region must clip");
+        // the finished latch is chunking-independent
+        assert!(continuous.2 && alt_117_118.2 && alt_64_128.2);
+    }
 }

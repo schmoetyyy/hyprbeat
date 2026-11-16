@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # hyprbeat phase-3 import validation — run this ON THE DEV MACHINE
 # (NixOS + Hyprland), for the commit-5 scope: --import / --library-root CLI
-# wiring (§5.2, D-43/D-44).
+# wiring (§5.2, D-43/D-44). Commit 6 rider (D-45): step 2 also asserts
+# the index is schema v2 with the per-set `sets` manifest.
 #
 #   [0] build inside the flake devshell + offline gates (fmt/clippy/test)
 #   [1] committed synthetic fixtures are byte-exact (sha256 -c, D-34 pattern)
@@ -149,10 +150,10 @@ do
   test -s "$SETDIR/$f" || { bad "missing on disk: $SETDIR/$f"; MISSING=1; }
 done
 if test "$MISSING" -eq 0; then ok "songs/20261115/ holds all 4 kept files by exact name"; fi
-if test -s "$ROOT/index.json" && grep -q '"version"' "$ROOT/index.json"; then
-  ok "index.json written (schema version field present, D-13 v1)"
+if test -s "$ROOT/index.json" && grep -q '"version"' "$ROOT/index.json" && grep -q '"sets"' "$ROOT/index.json"; then
+  ok "index.json written (schema v2: version + per-set sets manifest, D-13/D-45)"
 else
-  bad "index.json missing or has no version field"
+  bad "index.json missing, or lacks the version/sets fields (D-13 v2, D-45)"
 fi
 
 # ------------------------------------------- 3. re-import: dedup, index frozen

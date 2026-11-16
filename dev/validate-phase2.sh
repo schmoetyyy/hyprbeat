@@ -121,7 +121,7 @@ else
   bad "no 'audio clock' stats lines"
 fi
 BUFREQ=$(grep -o 'buffer=[^ ]*' "$LOGDIR/audio1.log" | head -1 || true)
-note "buffer request: ${BUFREQ:-<not logged>} (D-37; 256 frames ≈ 5.3 ms — was 32 ms device default)"
+note "buffer request: ${BUFREQ:-<not logged>} (D-37 amended: default 512 ≈ 10.7 ms @ 48 kHz — was 32 ms device default)"
 
 ask "watch the background during the next 10 s run: do you HEAR the tone and SEE the gradient pulse in time with the beats? [y/N] "
 MUSIC_SYNC="${ans:-n}"
