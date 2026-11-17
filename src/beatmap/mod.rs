@@ -27,10 +27,16 @@
 //! posture): timing-point lines with fewer than 7 comma fields (pre-v5
 //! legacy) and osu!mania holds (type bit 7) fail with explicit errors.
 
+// §10 row 3 (visualizer, commit a): the D-45-consuming loader — set-key
+// → manifest → difficulty selection → Timeline.
+pub mod load;
 // §5.2 .osz zip import: filter, set-id routing, caps (D-43/D-44)
 pub mod import;
 // §5.2 library index + content-addressed store (D-13/D-41/D-42)
 pub mod osz;
+// §10 row 3 (visualizer, commit a): whole-map timeline model — the
+// corrected §7.3 slider duration formula lives here.
+pub mod timeline;
 
 use std::fmt;
 

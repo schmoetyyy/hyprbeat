@@ -79,7 +79,11 @@ fn keep_extension(raw_name: &str) -> bool {
 /// and past [`LibraryIndex`]'s hash-keyed displacement (D-44 hole).
 /// Pure string work: `sanitize_rel_path` already rejected `..`, absolute
 /// paths, backslashes and NULs, so only normal parts and `.` remain.
-fn normalize_rel(rel: &str) -> String {
+///
+/// `pub(crate)`: the timeline loader's audio match reuses this exact
+/// normalization (Δ-I, ruling 2026-11-17 — exact, then normalized,
+/// never basename-only).
+pub(crate) fn normalize_rel(rel: &str) -> String {
     rel.split('/')
         .filter(|part| !part.is_empty() && *part != ".")
         .collect::<Vec<_>>()

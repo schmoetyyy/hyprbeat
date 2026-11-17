@@ -39,6 +39,30 @@ fn main() -> ExitCode {
         hyprbeat::beatmap::import::run_cli(osz_path, args.library_root.as_deref())
             .map(|_| ())
             .map_err(|e| Box::new(e) as hyprbeat::Error)
+    } else if let Some(map_path) = &args.map {
+        // --map (direct .osu path) — §10 row 3, visualizer commit a,
+        // ruling 2026-11-17 (the strict per-flag split): load ONE file
+        // through load_file — it must exist and be an .osu, no
+        // set-key fallback — and exit: no render, no audio device yet
+        // (the renderer + audio wiring land in commit b). LoadError
+        // joins the crate's boxed Error like ImportError.
+        hyprbeat::beatmap::load::run_map_cli(map_path)
+            .map(|_| ())
+            .map_err(|e| Box::new(e) as hyprbeat::Error)
+    } else if let Some(set_key) = &args.set {
+        // --set (library set key) — §10 row 3, visualizer commit a,
+        // ruling 2026-11-17: resolve the key through the D-45 manifest
+        // ONLY (load_set — no filesystem probe, so a file named KEY in
+        // the working directory cannot hijack the lookup) and exit: no
+        // render, no audio device yet (commit b wires them). LoadError
+        // joins the crate's boxed Error like ImportError.
+        hyprbeat::beatmap::load::run_set_cli(
+            set_key,
+            args.diff.as_deref(),
+            args.library_root.as_deref(),
+        )
+        .map(|_| ())
+        .map_err(|e| Box::new(e) as hyprbeat::Error)
     } else if args.headless {
         hyprbeat::render::headless::render_png(&args).map(|_| ())
     } else {

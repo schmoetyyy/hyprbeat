@@ -4,7 +4,9 @@
 //! diagnostic flag, and `clap` is scheduled to arrive in phase 5 together
 //! with the config-file overrides (§6). Keeping the dependency tree small
 //! is a project value (§4). Phase 3 adds the first user-facing operation,
-//! `--import` + `--library-root` (§5.2) — still clap-free per D-20.
+//! `--import` + `--library-root` (§5.2), and the visualizer's `--map` /
+//! `--set` / `--diff` (§10 row 3, ruling 2026-11-17) — still clap-free
+//! per D-20.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,9 +38,26 @@ phase 5):
                             Skips (video, .osb, skins, unknown extensions)
                             are reported, not fatal; broken or hostile
                             archives fail BEFORE any write (D-44)
-        --library-root DIR  Library root for --import, overriding the XDG
-                            default ($XDG_DATA_HOME/hyprbeat). DIR gains
+        --library-root DIR  Library root for --import/--set, overriding the
+                            XDG default ($XDG_DATA_HOME/hyprbeat). DIR gains
                             songs/ and index.json; created on demand
+        --set KEY           Load a beatmap set from the library for the
+                            timeline visualizer (§10 row 3): a library
+                            set key (`<set-id>` or `unsubmitted/<hash8>`,
+                            the D-43 routing keys) resolved through the
+                            D-45 per-set manifest. This commit loads,
+                            logs a summary and exits — the renderer +
+                            audio wiring land with the visualizer commit
+        --map PATH          Load ONE direct .osu file for the timeline
+                            visualizer (dev testing, §6): exactly one
+                            difficulty, no manifest lookup. Same
+                            load-and-exit contract as --set
+        --diff NAME         Difficulty within a --set set (ruling
+                            2026-11-17): exact match on the difficulty
+                            name; otherwise the first difficulty is used
+                            and a warning lists every alternative.
+                            Requires --set (a --map .osu has exactly one
+                            difficulty)
         --headless          Render one frame offscreen to a PNG and exit
                             (no compositor required; needs a Vulkan or GLES
                             driver — lavapipe/swrast works)
@@ -89,6 +108,9 @@ phase 5):
 EXAMPLES:
     hyprbeat --import map.osz                           # import into the XDG library
     hyprbeat --import map.osz --library-root /tmp/lib   # import into a scratch library
+    hyprbeat --set 2536560                              # load first diff (warn lists all)
+    hyprbeat --set 2536560 --diff Normal                # exact difficulty name
+    hyprbeat --map assets/golden/v14-standard.osu       # direct .osu (dev testing)
     hyprbeat --testcard --timeout 10                     # watch the background
     hyprbeat --headless --scale 1.25 --testcard --out /tmp/card.png
     hyprbeat --audio assets/test-tone.wav --timeout 20   # music-synced animation
@@ -125,9 +147,23 @@ pub struct Args {
     /// One `.osz` to import into the library, then exit (§5.2, phase 3).
     /// Pure library operation: no render, no audio device.
     pub import: Option<PathBuf>,
-    /// Library root override for `--import` (default: the XDG data dir,
-    /// I-07). The dir gains `songs/` + `index.json`.
+    /// Library root override for `--import`/`--set` (default: the XDG
+    /// data dir, I-07). The dir gains `songs/` + `index.json`.
     pub library_root: Option<PathBuf>,
+    /// A direct `.osu` path for the timeline visualizer (§10 row 3,
+    /// §6 dev testing): exactly one difficulty, no manifest lookup.
+    /// This commit loads and exits; rendering is commit b.
+    pub map: Option<String>,
+    /// A library set key (`<set-id>` or `unsubmitted/<hash8>`, the D-43
+    /// routing keys) resolved through the D-45 manifest loader (ruling
+    /// 2026-11-17: the two-flag split — `--map` is the direct path,
+    /// `--set` the library key). This commit loads and exits;
+    /// rendering is commit b.
+    pub set: Option<String>,
+    /// Difficulty within a `--set` set: exact match, else the first
+    /// difficulty + a warning listing all alternatives (ruling
+    /// 2026-11-17). Requires `--set`; a `--map` .osu has exactly one.
+    pub diff: Option<String>,
     /// Force the degraded wall clock even with a working device (D-16 test).
     pub no_audio: bool,
     /// Master volume 0..1 (§6 `[general] volume` — CLI stand-in until phase 5).
@@ -171,6 +207,9 @@ where
     let mut audio: Option<PathBuf> = None;
     let mut import: Option<PathBuf> = None;
     let mut library_root: Option<PathBuf> = None;
+    let mut map: Option<String> = None;
+    let mut set: Option<String> = None;
+    let mut diff: Option<String> = None;
     let mut no_audio = false;
     let mut volume = crate::audio::DEFAULT_VOLUME;
     let mut offset_ms = 0.0f64;
@@ -201,6 +240,18 @@ where
                 let raw =
                     parse_value(&mut it, "--library-root", |s| Ok::<_, String>(s.to_owned()))?;
                 library_root = Some(PathBuf::from(raw));
+            }
+            "--map" => {
+                let raw = parse_value(&mut it, "--map", parse_nonempty)?;
+                map = Some(raw);
+            }
+            "--set" => {
+                let raw = parse_value(&mut it, "--set", parse_nonempty)?;
+                set = Some(raw);
+            }
+            "--diff" => {
+                let raw = parse_value(&mut it, "--diff", parse_nonempty)?;
+                diff = Some(raw);
             }
             "--volume" => {
                 volume = parse_value(&mut it, "--volume", parse_volume)?;
@@ -251,8 +302,50 @@ where
     if import.is_some() && (headless || probe || latency_test || audio.is_some() || no_audio) {
         return Err("--import is a pure library operation; --headless/--probe/--latency-test/--audio/--no-audio are render/audio-mode flags".to_owned());
     }
-    if library_root.is_some() && import.is_none() {
-        return Err("--library-root is only meaningful with --import (song select grows its own library flag in phase 8)".to_owned());
+    // --map (direct path) and --set (library key) are the two DISJOINT
+    // load forms of the two-flag split (ruling 2026-11-17; the merged
+    // probing --map SET|PATH of the first delivery was an unflagged
+    // Δ).
+    if map.is_some() && set.is_some() {
+        return Err(
+            "--map (direct .osu path) and --set (library set key) are mutually exclusive"
+                .to_owned(),
+        );
+    }
+    // --import, --map and --set are one library operation per run (one
+    // writes, two read — run them separately).
+    if import.is_some() && (map.is_some() || set.is_some()) {
+        return Err(
+            "--import, --map and --set are one library operation per run — run them separately"
+                .to_owned(),
+        );
+    }
+    // --map/--set (commit a) are load-and-exit: the renderer + audio
+    // wiring land with the visualizer commit (b), so the render/audio
+    // mode flags are refused rather than silently ignored. Inert knobs
+    // (--fps, --size, --timeout, …) stay legal and are ignored.
+    if (map.is_some() || set.is_some())
+        && (headless || probe || latency_test || testcard || audio.is_some() || no_audio)
+    {
+        return Err(
+            "--map/--set load the timeline and exit (this commit); the render and audio wiring land with the visualizer commit — drop the render/audio flags"
+                .to_owned(),
+        );
+    }
+    // --diff selects within a --set; a --map .osu carries exactly one
+    // difficulty (there is nothing to select).
+    if diff.is_some() && set.is_none() {
+        return Err(
+            "--diff selects a difficulty within a --set set (a --map .osu has exactly one difficulty)".to_owned(),
+        );
+    }
+    // --library-root roots the library readers: --import and --set (a
+    // --map .osu is loaded directly; song select grows its own library
+    // flag in phase 8).
+    if library_root.is_some() && import.is_none() && set.is_none() {
+        return Err(
+            "--library-root is only meaningful with --import or --set (a --map .osu is loaded directly; song select grows its own library flag in phase 8)".to_owned(),
+        );
     }
 
     // --timeout: explicit value wins (0 disables); otherwise a mode-dependent
@@ -288,6 +381,9 @@ where
         audio,
         import,
         library_root,
+        map,
+        set,
+        diff,
         no_audio,
         volume,
         offset_ms,
@@ -398,6 +494,16 @@ fn parse_timeout(s: &str) -> Result<Option<Duration>, String> {
     Ok(Some(Duration::from_secs_f64(secs)))
 }
 
+/// `--map`/`--set`/`--diff` values: any non-empty string (a path, a
+/// set key or a difficulty name — the loader gives the precise error
+/// when the spelling is wrong).
+fn parse_nonempty(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err("must not be empty".to_owned());
+    }
+    Ok(s.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +565,57 @@ mod tests {
         assert!(args(&["--library-root"]).is_err());
         // inert render knobs alongside --import are harmless (ignored)
         assert!(args(&["--import", "m.osz", "--fps", "60"]).is_ok());
+    }
+
+    #[test]
+    fn map_and_set_flags_parse_and_conflict() {
+        // --map parses as a direct .osu path; --set as a library set key.
+        let a = args(&["--map", "assets/golden/v14-standard.osu"]).unwrap();
+        assert_eq!(a.map, Some("assets/golden/v14-standard.osu".to_owned()));
+        assert_eq!(a.set, None);
+        let a = args(&["--set", "2536560"]).unwrap();
+        assert_eq!(a.set, Some("2536560".to_owned()));
+        assert_eq!(a.map, None);
+        assert_eq!(a.diff, None);
+        let a = args(&["--set", "2536560", "--diff", "Normal"]).unwrap();
+        assert_eq!(a.diff, Some("Normal".to_owned()));
+        // Set keys carry the unsubmitted routing prefix (D-43).
+        assert!(args(&["--set", "unsubmitted/ab12cd34"]).is_ok());
+        // The two load forms are disjoint — one per run.
+        assert!(args(&["--map", "x.osu", "--set", "1"]).is_err());
+        // --diff selects within --set only (a --map .osu has exactly one
+        // difficulty — there is nothing to select).
+        assert!(args(&["--diff", "Normal"]).is_err());
+        assert!(args(&["--map", "x.osu", "--diff", "Normal"]).is_err());
+        // --map/--set (this commit) load and exit — render/audio flags
+        // conflict until the visualizer commit wires them.
+        for flag in ["--headless", "--testcard", "--probe", "--latency-test"] {
+            assert!(args(&["--map", "x.osu", flag]).is_err(), "--map + {flag}");
+            assert!(args(&["--set", "1", flag]).is_err(), "--set + {flag}");
+        }
+        assert!(args(&["--map", "x.osu", "--audio", "y.mp3"]).is_err());
+        assert!(args(&["--set", "1", "--audio", "y.mp3"]).is_err());
+        assert!(args(&["--map", "x.osu", "--no-audio"]).is_err());
+        assert!(args(&["--set", "1", "--no-audio"]).is_err());
+        // Library operations refuse to share one run.
+        assert!(args(&["--map", "x.osu", "--import", "m.osz"]).is_err());
+        assert!(args(&["--set", "1", "--import", "m.osz"]).is_err());
+        // --library-root roots --import and --set (Δ-B, accepted
+        // 2026-11-17) ... but not --map (a direct .osu needs no
+        // library), and not alone.
+        let a = args(&["--set", "1", "--library-root", "/tmp/lib"]).unwrap();
+        assert_eq!(a.library_root, Some(PathBuf::from("/tmp/lib")));
+        assert!(args(&["--map", "x.osu", "--library-root", "/tmp/lib"]).is_err());
+        assert!(args(&["--library-root", "/tmp/lib"]).is_err());
+        // Missing / empty values.
+        assert!(args(&["--map"]).is_err());
+        assert!(args(&["--map", "  "]).is_err());
+        assert!(args(&["--set"]).is_err());
+        assert!(args(&["--set", "  "]).is_err());
+        assert!(args(&["--diff"]).is_err());
+        // Inert knobs stay legal alongside either load flag.
+        assert!(args(&["--map", "x.osu", "--fps", "60", "--timeout", "5"]).is_ok());
+        assert!(args(&["--set", "1", "--fps", "60", "--timeout", "5"]).is_ok());
     }
 
     #[test]
