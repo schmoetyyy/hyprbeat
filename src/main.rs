@@ -40,33 +40,33 @@ fn main() -> ExitCode {
             .map(|_| ())
             .map_err(|e| Box::new(e) as hyprbeat::Error)
     } else if let Some(map_path) = &args.map {
-        // --map (direct .osu path) — §10 row 3, visualizer commit a,
-        // ruling 2026-11-17 (the strict per-flag split): load ONE file
-        // through load_file — it must exist and be an .osu, no
-        // set-key fallback — and exit: no render, no audio device yet
-        // (the renderer + audio wiring land in commit b). LoadError
-        // joins the crate's boxed Error like ImportError.
+        // --map (direct .osu path) — §10 row 3, visualizer commit b:
+        // load ONE file through the commit-a loader (ruling 2026-11-17,
+        // the strict per-flag split: it must exist and be an .osu, no
+        // set-key fallback; the D-38 summary line still logs), then
+        // render — live on the desktop, or one still frame with
+        // --headless. LoadError joins the crate's boxed Error like
+        // ImportError.
         hyprbeat::beatmap::load::run_map_cli(map_path)
-            .map(|_| ())
             .map_err(|e| Box::new(e) as hyprbeat::Error)
+            .and_then(|map| dispatch_map(&args, map))
     } else if let Some(set_key) = &args.set {
-        // --set (library set key) — §10 row 3, visualizer commit a,
-        // ruling 2026-11-17: resolve the key through the D-45 manifest
-        // ONLY (load_set — no filesystem probe, so a file named KEY in
-        // the working directory cannot hijack the lookup) and exit: no
-        // render, no audio device yet (commit b wires them). LoadError
-        // joins the crate's boxed Error like ImportError.
+        // --set (library set key) — §10 row 3, visualizer commit b:
+        // resolve the key through the D-45 manifest ONLY (load_set — no
+        // filesystem probe, so a file named KEY in the working
+        // directory cannot hijack the lookup), then the same
+        // load-then-dispatch as --map.
         hyprbeat::beatmap::load::run_set_cli(
             set_key,
             args.diff.as_deref(),
             args.library_root.as_deref(),
         )
-        .map(|_| ())
         .map_err(|e| Box::new(e) as hyprbeat::Error)
+        .and_then(|map| dispatch_map(&args, map))
     } else if args.headless {
-        hyprbeat::render::headless::render_png(&args).map(|_| ())
+        hyprbeat::render::headless::render_png(&args, None).map(|_| ())
     } else {
-        hyprbeat::wayland::run(args)
+        hyprbeat::wayland::run(args, None)
     };
 
     match result {
@@ -75,5 +75,21 @@ fn main() -> ExitCode {
             eprintln!("hyprbeat: error: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Visualizer commit b dispatch: the map is loaded, now render it —
+/// live on the desktop, or as one still frame with `--headless`.
+/// `--testcard` is not implied by `--headless` anymore (Δ-F): the
+/// still frame is the map's timeline view unless the flag is passed
+/// explicitly.
+fn dispatch_map(
+    args: &hyprbeat::cli::Args,
+    map: hyprbeat::beatmap::load::LoadedMap,
+) -> Result<(), hyprbeat::Error> {
+    if args.headless {
+        hyprbeat::render::headless::render_png(args, Some(&map)).map(|_| ())
+    } else {
+        hyprbeat::wayland::run(args.clone(), Some(map))
     }
 }

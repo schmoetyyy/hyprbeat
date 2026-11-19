@@ -1,10 +1,12 @@
 //! wgpu rendering core (§3.5, D-05).
 //!
-//! Phase 1 draws everything with a single pipeline and a single draw call: a
-//! fullscreen triangle whose fragment shader blends the four theme-corner
-//! colors and can overlay the scale test card. The instanced-quad pipeline
-//! for gameplay sprites replaces this in later phases, but the `Gpu`/`Renderer`
-//! split and the uniform discipline stay.
+//! Phase 1 draws the wallpaper with a single pipeline and a single draw
+//! call: a fullscreen triangle whose fragment shader blends the four
+//! theme-corner colors and can overlay the scale test card. Phase 3
+//! (visualizer commit b) adds the second half of D-05: the [`Renderer`]
+//! owns the instanced-quad pipeline (`render::pipeline`) and draws the
+//! timeline view's [`Quad`]s on top of the gradient. The
+//! `Gpu`/`Renderer` split and the uniform discipline stay.
 
 pub mod headless;
 pub mod pipeline;
@@ -13,6 +15,7 @@ pub mod timeline;
 
 use crate::Error;
 use crate::config::theme::{self, Color};
+use crate::render::pipeline::{Quad, QuadPipeline};
 
 pub const SHADER: &str = include_str!("shader.wgsl");
 
@@ -213,11 +216,14 @@ impl FrameParams {
     }
 }
 
-/// One pipeline + uniform binding for a specific output format.
+/// One gradient pipeline + uniform binding, plus the instanced-quad
+/// pipeline (D-05, phase 3) for the timeline view — one per output
+/// format, created beside the surface.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    quads: QuadPipeline,
 }
 
 impl Renderer {
@@ -283,14 +289,20 @@ impl Renderer {
                 resource: uniforms.as_entire_binding(),
             }],
         });
+        let quads = QuadPipeline::new(device, format);
         Self {
             pipeline,
             uniforms,
             bind_group,
+            quads,
         }
     }
 
-    /// Record one fullscreen draw. The caller submits the encoder and (for
+    /// Record one frame: the gradient pass clears and draws the
+    /// fullscreen shader (the amber degraded band and the test card
+    /// live there), then the quad pass (D-05) draws `quads` on top
+    /// with `LoadOp::Load` — painter's order is the caller's
+    /// (`render::timeline`). The caller submits the encoder and (for
     /// live surfaces) presents.
     pub fn render(
         &self,
@@ -298,27 +310,42 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         frame: &FrameParams,
+        quads: &[Quad],
     ) {
         queue.write_buffer(&self.uniforms, 0, &frame.pack().to_bytes());
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("hyprbeat frame"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        // Pass 1 — the gradient. The explicit block DROPS the render
+        // pass before pass 2 begins: wgpu refuses a second
+        // `begin_render_pass` on an encoder whose first pass has not
+        // been dropped.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hyprbeat frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        // Pass 2 — the instanced quads (D-05, `LoadOp::Load`) on top.
+        self.quads.draw(
+            queue,
+            encoder,
+            view,
+            (frame.logical.0, frame.logical.1),
+            quads,
+        );
     }
 }
 

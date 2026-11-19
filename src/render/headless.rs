@@ -1,6 +1,10 @@
 //! `--headless`: render exactly one frame offscreen and write it as a PNG
 //! (§8 debug tooling). No compositor, no layer-shell — used by CI and quick
 //! iteration, and by `dev/validate-phase1.sh` to check the scale math.
+//! Visualizer commit b: with `--map`/`--set` the frame is the map's
+//! timeline view parked at its span start (no engine, no amber band —
+//! the still frame is the PlainWall view); `--testcard` (explicit since
+//! Δ-F) replaces it with the scale pattern.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -8,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crate::Error;
+use crate::beatmap::load::LoadedMap;
 use crate::cli::Args;
 use crate::render::{self, FrameParams, Renderer};
 
@@ -15,7 +20,12 @@ use crate::render::{self, FrameParams, Renderer};
 /// enough for pixel-diff regression tests later on.
 const HEADLESS_TIME_MS: f64 = 1234.0;
 
-pub fn render_png(args: &Args) -> Result<PathBuf, Error> {
+/// Render exactly one frame offscreen and write it as a PNG (§8).
+/// `map` — the `--map`/`--set` load, when one happened — parks the
+/// timeline view at its span start: no engine is opened, so the still
+/// frame is the PlainWall view and never the amber band. Returns the
+/// written path.
+pub fn render_png(args: &Args, map: Option<&LoadedMap>) -> Result<PathBuf, Error> {
     let logical = args.size;
     let scale = args.scale;
     let (bw, bh) = render::scale::buffer_size(logical, scale);
@@ -57,12 +67,28 @@ pub fn render_png(args: &Args) -> Result<PathBuf, Error> {
         accent: render::accent_for_frame(true),
     };
 
+    // The map's timeline quads (commit b): parked at the span start —
+    // the no-audio caller rule (`render::timeline` docs). `--testcard`
+    // replaces the scene: the scale pattern needs an uncluttered
+    // background.
+    let quads = match map {
+        Some(m) if !args.testcard => {
+            let pal = crate::config::theme::midnight();
+            let scene = render::timeline::TimelineScene::new(&m.timeline, &pal, true);
+            scene.quads(
+                (logical.0 as f32, logical.1 as f32),
+                m.timeline.span_start_ms,
+            )
+        }
+        _ => Vec::new(),
+    };
+
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("hyprbeat headless"),
         });
-    renderer.render(&gpu.queue, &mut encoder, &view, &frame);
+    renderer.render(&gpu.queue, &mut encoder, &view, &frame, &quads);
 
     // copy into a CPU-readable staging buffer (rows padded to 256 bytes)
     let bytes_per_row = (bw * 4).next_multiple_of(256);

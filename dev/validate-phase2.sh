@@ -84,7 +84,7 @@ if nix develop -c cargo test --lib >/dev/null 2>&1; then ok "cargo test --lib"; 
 
 # ------------------------------------------------------------------ 1. headless
 say "1. headless PNG (explicit wall-clock path, D-16 — no audio device involved)"
-"$BIN" --headless --size 1920x1080 --scale 1.25 --out /tmp/hyprbeat-p2-125.png >/dev/null 2>&1
+"$BIN" --headless --testcard --size 1920x1080 --scale 1.25 --out /tmp/hyprbeat-p2-125.png >/dev/null 2>&1
 if test -s /tmp/hyprbeat-p2-125.png; then
   ok "headless PNG written ($(stat -c%s /tmp/hyprbeat-p2-125.png) bytes)"
 else

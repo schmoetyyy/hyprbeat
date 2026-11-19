@@ -17,6 +17,7 @@ pub mod latency;
 pub mod probe;
 pub mod surface;
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use calloop::signals::{Signal, Signals};
@@ -61,8 +62,9 @@ use wayland_protocols::wp::viewporter::client::{
 
 use crate::Error;
 use crate::audio::{self, mixer::SoundEvent};
+use crate::beatmap::load::{LoadedMap, MapSource};
 use crate::cli::Args;
-use crate::render::{self, FrameParams, Gpu, scale};
+use crate::render::{self, FrameParams, Gpu, pipeline::Quad, scale};
 use probe::ProbeReport;
 use surface::OutputSurface;
 
@@ -88,15 +90,51 @@ const STATS_INTERVAL: Duration = Duration::from_secs(5);
 ///   (§3.3, I-01). After a runtime stream failure the clock inside the
 ///   engine flips itself to its degraded wall mode and [`App::timing_degraded`]
 ///   turns on the amber band (I-12).
-/// * `DegradedWall` — audio was wanted but could not start (`--audio` failed
-///   to open, or the forced `--no-audio` validation path).
-/// * `PlainWall` — no audio wanted at all: the phase-1 decorative gradient
-///   (NOT degraded — nothing to degrade; the demo autoplay of later phases
-///   will always carry a song).
+/// * `DegradedWall` — audio was wanted but could not start (the map's
+///   resolved audio or an `--audio` override failed to open, or the forced
+///   `--no-audio` validation path): the wall clock sweeps the timeline
+///   under the amber band (D-35).
+/// * `PlainWall` — no audio wanted at all: no `--audio`, and the map's own
+///   audio is absent or unresolvable — the decorative gradient plus the
+///   timeline view parked at its span start. NOT degraded, no band:
+///   nothing to degrade, the map simply has no music (the demo autoplay
+///   of later phases will always carry a song).
 enum TimingState {
     Audio(audio::AudioEngine),
     DegradedWall(audio::clock::Clock),
     PlainWall,
+}
+
+// ---------------------------------------------------------------------------
+// Map scene (phase 3, visualizer commit b)
+// ---------------------------------------------------------------------------
+
+/// The loaded map's timeline view baked once for both target formats
+/// (`render::timeline::TimelineScene::new` is the one-time color bake;
+/// `quads` runs per frame) — every output picks its variant via
+/// `render::format_is_srgb` (the `color_for_format` discipline).
+struct MapScenes {
+    srgb: render::timeline::TimelineScene,
+    linear: render::timeline::TimelineScene,
+}
+
+impl MapScenes {
+    fn new(map: &LoadedMap) -> Self {
+        let pal = crate::config::theme::midnight();
+        Self {
+            srgb: render::timeline::TimelineScene::new(&map.timeline, &pal, true),
+            linear: render::timeline::TimelineScene::new(&map.timeline, &pal, false),
+        }
+    }
+
+    /// The bake for one output format.
+    fn for_format(&self, srgb_target: bool) -> &render::timeline::TimelineScene {
+        if srgb_target {
+            &self.srgb
+        } else {
+            &self.linear
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +183,10 @@ pub struct App {
     probe_report: ProbeReport,
     /// Phase 2: the animation/gameplay time base (I-01, D-16).
     timing: TimingState,
+    /// Phase 3 (commit b): the loaded map + its baked timeline scenes
+    /// (`None` = the phase-1/2 gradient wallpaper, no map view).
+    map: Option<LoadedMap>,
+    scenes: Option<MapScenes>,
     /// `--latency-test` recorded taps (see `latency.rs`).
     latency_taps: Vec<latency::Tap>,
     /// Deadline of the current latency-test visual flash.
@@ -475,6 +517,17 @@ impl App {
                 self.args.testcard,
             )
         };
+        // The map's timeline quads (commit b): the scene consumes
+        // UNWRAPPED song time (the shader gets the 8 s-wrapped copy
+        // below for f32 precision) and, with a map loaded but no audio
+        // wanted, parks at the span start (`render::timeline` docs).
+        // `--testcard` replaces the map view — the scale pattern needs
+        // an uncluttered background.
+        let quads = if testcard {
+            Vec::new()
+        } else {
+            self.scene_quads(logical, srgb, self.scene_time_ms())
+        };
         // The shader consumes time as f32; a raw 24/7 millisecond counter
         // would visibly step after ~4.6 h (2^24 ms). All phase-1/2 animations
         // have periods dividing 8000 ms, so wrap first — the wallpaper is
@@ -530,7 +583,7 @@ impl App {
             });
         self.outputs[idx]
             .renderer
-            .render(&self.gpu.queue, &mut encoder, &view, &frame);
+            .render(&self.gpu.queue, &mut encoder, &view, &frame, &quads);
         self.gpu.queue.submit([encoder.finish()]);
         // wgpu 30: present lives on Queue — it attaches the wl_buffer and
         // commits the surface (so viewport/frame-callback state committed
@@ -575,6 +628,34 @@ impl App {
             })
             .unwrap_or(0.0) as f32;
         (anim_ms, level, flash, self.timing_degraded())
+    }
+
+    /// Song time for the timeline scene — NOT the shader's wrapped
+    /// copy: the audio clock when a session exists (I-01), the degraded
+    /// wall clock when one was wanted and failed, and the span start
+    /// when a map is loaded but no audio is wanted (the parked-playhead
+    /// rule, `render::timeline` docs — the decorative gradient keeps
+    /// its own wall time either way).
+    fn scene_time_ms(&self) -> f64 {
+        match (&self.timing, &self.map) {
+            (TimingState::Audio(engine), _) => engine.clock.time_ms(),
+            (TimingState::DegradedWall(clock), _) => clock.time_ms(),
+            (TimingState::PlainWall, Some(map)) => map.timeline.span_start_ms,
+            (TimingState::PlainWall, None) => 0.0,
+        }
+    }
+
+    /// The frame's timeline quads in painter order, or none without a
+    /// map. `srgb_target` picks the color bake for this output's format
+    /// (the `render::color_for_format` discipline).
+    fn scene_quads(&self, logical: (u32, u32), srgb_target: bool, time_ms: f64) -> Vec<Quad> {
+        match &self.scenes {
+            Some(scenes) => {
+                let scene = scenes.for_format(srgb_target);
+                scene.quads((logical.0 as f32, logical.1 as f32), time_ms)
+            }
+            None => Vec::new(),
+        }
     }
 
     // -- periodic maintenance ------------------------------------------------
@@ -1283,7 +1364,11 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(args: Args) -> Result<(), Error> {
+/// Live wallpaper session (§3.1/§8): one background layer-shell surface
+/// per output, the frame-callback render loop — and, visualizer commit
+/// b, the loaded map's timeline view wired onto the audio clock
+/// (`map` = `None` runs the plain phase-1/2 gradient wallpaper).
+pub fn run(args: Args, map: Option<LoadedMap>) -> Result<(), Error> {
     let conn = Connection::connect_to_env()
         .map_err(|e| format!("cannot connect to a Wayland server ({e}) — run hyprbeat inside Hyprland/sway/niri, or use --headless"))?;
 
@@ -1353,11 +1438,15 @@ pub fn run(args: Args) -> Result<(), Error> {
         }
     }
 
-    // -- phase 2: the audio session / time base (I-01, D-16) ------------------
+    // -- phase 2/3: the audio session / time base + the map view -------------
     // Started after the signal mask (see the comment above) and before the
     // loop so the first frame already draws on audio clock time. Failures
     // degrade, never abort (a wallpaper must not die with PipeWire).
-    let timing = build_timing(&args);
+    // Commit b: bake the map's timeline scenes once; build_timing then
+    // resolves the wanted music (--audio wins over the map's own audio;
+    // the Δ-E lead-in is applied inside).
+    let scenes = map.as_ref().map(MapScenes::new);
+    let timing = build_timing(&args, map.as_ref());
     let timing_ok = matches!(timing, TimingState::Audio(ref e) if !e.clock.is_degraded());
 
     let mut app = App {
@@ -1381,6 +1470,8 @@ pub fn run(args: Args) -> Result<(), Error> {
         stats: FrameStats::default(),
         probe_report: ProbeReport::default(),
         timing,
+        map,
+        scenes,
         latency_taps: Vec::new(),
         flash_deadline: None,
         song_finished_logged: false,
@@ -1404,7 +1495,8 @@ pub fn run(args: Args) -> Result<(), Error> {
         probe = app.args.probe,
         audio_timing = timing_ok,
         latency_test = app.args.latency_test,
-        "hyprbeat starting (phase 2: audio clock + music-synced wallpaper)"
+        map = ?app.map.as_ref().map(|m| m.entry_name.as_str()),
+        "hyprbeat starting (phase 3: timeline visualizer on the audio clock)"
     );
 
     // First roundtrip: output geometry events arrive, OutputHandler fires,
@@ -1470,15 +1562,30 @@ pub fn run(args: Args) -> Result<(), Error> {
     Ok(())
 }
 
-/// Build the phase-2 time base from CLI intent (I-01, D-16).
-fn build_timing(args: &Args) -> TimingState {
-    let wants_audio = args.audio.is_some() || args.latency_test;
-    if wants_audio {
+/// Build the run's time base from CLI intent + the loaded map (I-01,
+/// D-16; commit b wiring).
+///
+/// Which music does the run want? An `--audio` PATH WINS over the map's
+/// own audio (an explicit user override, passed through untouched — a
+/// broken override file degrades below, D-16); the map's own audio is
+/// the set form's manifest path or the .osu's sibling `AudioFilename`,
+/// and an UNRESOLVED one wants no engine at all: the view parks
+/// (PlainWall, no band) — only a file that resolves and then fails to
+/// start degrades (DegradedWall + the amber band, D-35). `--no-audio`
+/// forces the degraded validation path regardless (D-35), and
+/// `--latency-test` needs a silent stream even without music.
+fn build_timing(args: &Args, map: Option<&LoadedMap>) -> TimingState {
+    if args.no_audio {
+        tracing::warn!("--no-audio: forced degraded wall-clock path (D-16 validation instrument)");
+        return TimingState::DegradedWall(audio::clock::Clock::new_wall(args.offset_ms));
+    }
+    let music = resolved_music(args, map);
+    if music.is_some() || args.latency_test {
         match audio::AudioEngine::start(audio::StartOptions {
-            music: args.audio.as_deref(),
+            music: music.as_deref(),
             volume: args.volume,
             offset_ms: args.offset_ms,
-            lead_in_ms: 0.0,
+            lead_in_ms: map_lead_in_ms(map),
             buffer_frames: args.buffer_frames,
         }) {
             Ok(engine) => TimingState::Audio(engine),
@@ -1491,10 +1598,212 @@ fn build_timing(args: &Args) -> TimingState {
                 TimingState::DegradedWall(audio::clock::Clock::new_wall(args.offset_ms))
             }
         }
-    } else if args.no_audio {
-        tracing::warn!("--no-audio: forced degraded wall-clock path (D-16 validation instrument)");
-        TimingState::DegradedWall(audio::clock::Clock::new_wall(args.offset_ms))
     } else {
         TimingState::PlainWall
+    }
+}
+
+/// The music file this run wants, if any (commit b wiring): an `--audio`
+/// PATH WINS over the map's own audio and is passed through untouched (a
+/// broken override file degrades in `build_timing`, D-16); a map whose
+/// own audio does not resolve to an existing file wants none at all.
+fn resolved_music(args: &Args, map: Option<&LoadedMap>) -> Option<PathBuf> {
+    if let Some(override_path) = &args.audio {
+        return Some(override_path.clone());
+    }
+    map.and_then(map_audio_path)
+}
+
+/// The map's own audio, resolved to an existing file: the set form's
+/// D-45 manifest path (existence-checked — a dangling entry wants no
+/// engine), or the file form's `.osu`-sibling `AudioFilename` (the
+/// golden corpus's placeholder audio resolves to nothing on purpose).
+/// The set form never probes the filesystem for a missing manifest
+/// entry — that is the loader's business (D-45), not the renderer's.
+fn map_audio_path(map: &LoadedMap) -> Option<PathBuf> {
+    if map.beatmap.general.audio_filename.trim().is_empty() {
+        return None;
+    }
+    let candidate = match (&map.audio, &map.source) {
+        (Some(canonical), _) => canonical.clone(),
+        (None, MapSource::File { path }) => {
+            let dir = path.parent().unwrap_or(Path::new(""));
+            dir.join(&map.beatmap.general.audio_filename)
+        }
+        (None, MapSource::Set { .. }) => return None,
+    };
+    std::fs::canonicalize(candidate)
+        .ok()
+        .filter(|p| p.is_file())
+}
+
+/// Δ-E: the map's `AudioLeadIn` applied CALLER-side (phase 2 passed 0;
+/// the engine maps song t=0, the caller owns the shift). Negative file
+/// values are nonsense — clamped at 0; no map keeps the phase-2 zero.
+fn map_lead_in_ms(map: Option<&LoadedMap>) -> f64 {
+    map.map_or(0.0, |m| m.beatmap.general.audio_lead_in_ms.max(0.0) as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal `Args` for the wiring tests — only the audio-relevant
+    /// field varies; the parser has its own suite in `cli.rs`.
+    fn args(audio: Option<&str>) -> Args {
+        Args {
+            headless: false,
+            probe: false,
+            latency_test: false,
+            testcard: false,
+            timeout: None,
+            idle_fps: 30,
+            size: (1920, 1080),
+            scale: 1.0,
+            out: None,
+            audio: audio.map(PathBuf::from),
+            import: None,
+            library_root: None,
+            map: None,
+            set: None,
+            diff: None,
+            no_audio: false,
+            volume: crate::audio::DEFAULT_VOLUME,
+            offset_ms: 0.0,
+            buffer_frames: crate::audio::DEFAULT_BUFFER_FRAMES,
+            help: false,
+            version: false,
+        }
+    }
+
+    /// A `--map`-form [`LoadedMap`] from a minimal inline .osu (I-03:
+    /// invented metadata) naming `audio_name` with the given
+    /// `AudioLeadIn`; the timeline is unused by the wiring under test,
+    /// so it stays empty.
+    fn file_map(osu_path: &Path, audio_name: &str, lead_in: &str) -> LoadedMap {
+        let text = format!(
+            "osu file format v14\n\
+             \n\
+             [General]\n\
+             AudioFilename: {audio_name}\n\
+             AudioLeadIn: {lead_in}\n\
+             Mode: 0\n\
+             \n\
+             [Metadata]\n\
+             Version: Test\n\
+             BeatmapSetID: 31337\n\
+             \n\
+             [Difficulty]\n\
+             HPDrainRate: 5\n\
+             CircleSize: 4\n\
+             OverallDifficulty: 8\n\
+             SliderMultiplier: 1.9\n\
+             SliderTickRate: 1\n\
+             \n\
+             [TimingPoints]\n\
+             0,375,4,2,0,60,1,0\n\
+             \n\
+             [HitObjects]\n\
+             256,192,0,1,0\n"
+        );
+        let beatmap = crate::beatmap::parse_osu(&text).unwrap();
+        LoadedMap {
+            source: MapSource::File {
+                path: osu_path.to_path_buf(),
+            },
+            entry_name: "test.osu".to_owned(),
+            difficulties: Vec::new(),
+            timeline: crate::beatmap::timeline::Timeline {
+                span_start_ms: 0.0,
+                span_end_ms: 0.0,
+                events: Vec::new(),
+                kiai_ranges: Vec::new(),
+            },
+            beatmap,
+            audio: None,
+        }
+    }
+
+    /// The map's own audio resolves only to an existing FILE: the file
+    /// form joins `AudioFilename` onto the .osu's directory, the set
+    /// form trusts the manifest path alone (no filesystem probing —
+    /// the D-45 posture) and wants none without one.
+    #[test]
+    fn map_audio_resolves_only_existing_files() {
+        let dir = std::env::temp_dir().join(format!("hyprbeat-wl-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("map.osu"), b"osu").unwrap();
+        std::fs::write(dir.join("real.mp3"), b"fake").unwrap();
+        let osu = dir.join("map.osu");
+
+        assert_eq!(
+            map_audio_path(&file_map(&osu, "real.mp3", "0")),
+            std::fs::canonicalize(dir.join("real.mp3")).ok(),
+        );
+        // the golden corpus's placeholder audio: named but absent
+        assert_eq!(map_audio_path(&file_map(&osu, "missing.mp3", "0")), None);
+        // an empty name is no audio at all
+        assert_eq!(map_audio_path(&file_map(&osu, "  ", "0")), None);
+        // a directory named like the audio file is not audio either
+        std::fs::create_dir_all(dir.join("dir.mp3")).unwrap();
+        assert_eq!(map_audio_path(&file_map(&osu, "dir.mp3", "0")), None);
+
+        // the set form: manifest path only, never a probe
+        let mut m = file_map(&osu, "whatever.mp3", "0");
+        m.source = MapSource::Set {
+            set_key: "31337".to_owned(),
+        };
+        assert_eq!(map_audio_path(&m), None);
+        m.audio = Some(dir.join("missing.mp3"));
+        assert_eq!(map_audio_path(&m), None);
+        m.audio = Some(dir.join("real.mp3"));
+        assert_eq!(
+            map_audio_path(&m),
+            std::fs::canonicalize(dir.join("real.mp3")).ok()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--audio` wins over the map's own audio; unresolvable map audio
+    /// wants NO engine (PlainWall, no band — not an engine failure); the
+    /// override itself is passed through untouched (a broken `--audio`
+    /// file degrades in `build_timing`, D-16).
+    #[test]
+    fn resolved_music_prefers_the_audio_flag() {
+        let dir = std::env::temp_dir().join(format!("hyprbeat-wl-rm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("map.osu"), b"osu").unwrap();
+        std::fs::write(dir.join("real.mp3"), b"fake").unwrap();
+        let osu = dir.join("map.osu");
+
+        let m = file_map(&osu, "real.mp3", "0");
+        assert_eq!(
+            resolved_music(&args(Some("/tmp/override.mp3")), Some(&m)),
+            Some(PathBuf::from("/tmp/override.mp3")),
+        );
+        assert_eq!(resolved_music(&args(None), Some(&m)), map_audio_path(&m));
+        let unresolved = file_map(&osu, "missing.mp3", "0");
+        assert_eq!(resolved_music(&args(None), Some(&unresolved)), None);
+        assert_eq!(
+            resolved_music(&args(Some("/tmp/song.mp3")), None),
+            Some(PathBuf::from("/tmp/song.mp3")),
+        );
+        assert_eq!(resolved_music(&args(None), None), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Δ-E: the map's `AudioLeadIn` reaches the engine caller-side —
+    /// negative file values clamp at 0, a missing key keeps the
+    /// phase-2 zero, and no map keeps the phase-2 zero too.
+    #[test]
+    fn lead_in_is_map_driven_and_clamped() {
+        let osu = PathBuf::from("/tmp/lead-in-map.osu");
+        assert_eq!(map_lead_in_ms(Some(&file_map(&osu, "a.mp3", "800"))), 800.0);
+        assert_eq!(map_lead_in_ms(Some(&file_map(&osu, "a.mp3", "0"))), 0.0);
+        assert_eq!(map_lead_in_ms(Some(&file_map(&osu, "a.mp3", "-500"))), 0.0);
+        assert_eq!(map_lead_in_ms(Some(&file_map(&osu, "a.mp3", ""))), 0.0);
+        assert_eq!(map_lead_in_ms(None), 0.0);
     }
 }

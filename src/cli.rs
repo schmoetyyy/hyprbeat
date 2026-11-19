@@ -6,7 +6,8 @@
 //! is a project value (§4). Phase 3 adds the first user-facing operation,
 //! `--import` + `--library-root` (§5.2), and the visualizer's `--map` /
 //! `--set` / `--diff` (§10 row 3, ruling 2026-11-17) — still clap-free
-//! per D-20.
+//! per D-20. Visualizer commit b wires their render/audio flags:
+//! `--headless` no longer implies `--testcard` (Δ-F, ruling 2026-11-19).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -24,8 +25,9 @@ compatible with the osu! beatmap format. Built for Hyprland/Wayland.
 
 Phase 2 preview: ambient gradient wallpaper, frame-callback render loop,
 fractional-scale-correct rendering, audio-clock-driven animation (cpal +
-symphonia). Beatmap library import (.osz, phase 3) via --import; judgement
-and the config file arrive in phases 4–8 (see CONTEXT.md §10).
+symphonia). Beatmap library import (.osz, phase 3) via --import; the
+timeline visualizer (phase 3) via --map/--set; judgement and the config
+file arrive in phases 4–8 (see CONTEXT.md §10).
 
 USAGE:
     hyprbeat [OPTIONS]
@@ -45,13 +47,15 @@ phase 5):
                             timeline visualizer (§10 row 3): a library
                             set key (`<set-id>` or `unsubmitted/<hash8>`,
                             the D-43 routing keys) resolved through the
-                            D-45 per-set manifest. This commit loads,
-                            logs a summary and exits — the renderer +
-                            audio wiring land with the visualizer commit
+                            D-45 per-set manifest, then rendered — live
+                            on the desktop, or one still frame with
+                            --headless
         --map PATH          Load ONE direct .osu file for the timeline
                             visualizer (dev testing, §6): exactly one
-                            difficulty, no manifest lookup. Same
-                            load-and-exit contract as --set
+                            difficulty, no manifest lookup. Renders like
+                            --set; the map's own audio is the .osu's
+                            sibling AudioFilename (an --audio PATH
+                            overrides it)
         --diff NAME         Difficulty within a --set set (ruling
                             2026-11-17): exact match on the difficulty
                             name; otherwise the first difficulty is used
@@ -60,21 +64,28 @@ phase 5):
                             difficulty)
         --headless          Render one frame offscreen to a PNG and exit
                             (no compositor required; needs a Vulkan or GLES
-                            driver — lavapipe/swrast works)
+                            driver — lavapipe/swrast works). With --map/
+                            --set the frame is the map's timeline view;
+                            --testcard is no longer implied — pass it
+                            explicitly for the scale pattern
         --size WxH          Headless logical size [default: 1920x1080]
         --scale SCALE       Headless simulated output scale [default: 1.0]
         --out PATH          Headless PNG output path
                             [default: $TMPDIR/hyprbeat-headless.png]
         --testcard          Draw the scale test pattern (2 px accent border,
                             1 px grid, checker strip, rings, 1 Hz sweep) over
-                            the gradient — use it to judge 125% scaling
+                            the gradient — use it to judge 125% scaling;
+                            with --map/--set it replaces the timeline view
         --audio PATH        Load an audio file (mp3/ogg/flac/wav) and sync the
                             wallpaper to it: the clock, the animation and
                             the pause machinery all hang off the audio stream
-                            (CONTEXT.md §3.3). Decodes land in
+                            (CONTEXT.md §3.3). With --map/--set the file
+                            overrides the map's own audio. Decodes land in
                             ~/.cache/hyprbeat/decoded/<sha256>.f32
         --no-audio          Force the degraded wall-clock path (D-16) even if
-                            an output device exists — validation instrument
+                            an output device exists — validation instrument;
+                            with --map/--set the timeline sweeps on the wall
+                            clock under the amber degraded band
         --volume V          Master volume 0.0–1.0 [default: 0.7]
         --offset-ms N       Universal audio offset (§3.3): shifts game time
                             relative to what you hear; negative = earlier
@@ -108,9 +119,10 @@ phase 5):
 EXAMPLES:
     hyprbeat --import map.osz                           # import into the XDG library
     hyprbeat --import map.osz --library-root /tmp/lib   # import into a scratch library
-    hyprbeat --set 2536560                              # load first diff (warn lists all)
+    hyprbeat --set 2536560                              # visualize first diff (warn lists all)
     hyprbeat --set 2536560 --diff Normal                # exact difficulty name
     hyprbeat --map assets/golden/v14-standard.osu       # direct .osu (dev testing)
+    hyprbeat --map x.osu --headless --out /tmp/map.png  # still frame of the map view
     hyprbeat --testcard --timeout 10                     # watch the background
     hyprbeat --headless --scale 1.25 --testcard --out /tmp/card.png
     hyprbeat --audio assets/test-tone.wav --timeout 20   # music-synced animation
@@ -124,13 +136,16 @@ trace. Docs: https://github.com/... (repo URL set at first publish).
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Args {
-    /// Offscreen single-frame render to PNG (no layer-shell, no compositor).
+    /// Offscreen single-frame render to PNG (no layer-shell, no
+    /// compositor). No implied `--testcard` since commit b (Δ-F) — pass
+    /// it explicitly for the scale pattern.
     pub headless: bool,
     /// Q-1/Q-2 input diagnostics (§14): full input region + on_demand keyboard.
     pub probe: bool,
     /// Tap-to-sound latency report (§3.6, §12.3).
     pub latency_test: bool,
-    /// Draw the scale test pattern.
+    /// Draw the scale test pattern (replaces the map view when one
+    /// is loaded).
     pub testcard: bool,
     /// Hard exit deadline. `None` = run until killed.
     pub timeout: Option<Duration>,
@@ -142,7 +157,8 @@ pub struct Args {
     pub scale: f64,
     /// Headless PNG destination (defaults into the system temp dir, I-07).
     pub out: Option<PathBuf>,
-    /// Music file to load and sync to (`--audio`, phase 2).
+    /// Music file to load and sync to (`--audio`, phase 2); with
+    /// `--map`/`--set` it overrides the map's own audio.
     pub audio: Option<PathBuf>,
     /// One `.osz` to import into the library, then exit (§5.2, phase 3).
     /// Pure library operation: no render, no audio device.
@@ -152,13 +168,14 @@ pub struct Args {
     pub library_root: Option<PathBuf>,
     /// A direct `.osu` path for the timeline visualizer (§10 row 3,
     /// §6 dev testing): exactly one difficulty, no manifest lookup.
-    /// This commit loads and exits; rendering is commit b.
+    /// Commit b: loads and renders — live, or one still frame with
+    /// `--headless`.
     pub map: Option<String>,
     /// A library set key (`<set-id>` or `unsubmitted/<hash8>`, the D-43
     /// routing keys) resolved through the D-45 manifest loader (ruling
     /// 2026-11-17: the two-flag split — `--map` is the direct path,
-    /// `--set` the library key). This commit loads and exits;
-    /// rendering is commit b.
+    /// `--set` the library key). Commit b: loads and renders — live,
+    /// or one still frame with `--headless`.
     pub set: Option<String>,
     /// Difficulty within a `--set` set: exact match, else the first
     /// difficulty + a warning listing all alternatives (ruling
@@ -320,15 +337,18 @@ where
                 .to_owned(),
         );
     }
-    // --map/--set (commit a) are load-and-exit: the renderer + audio
-    // wiring land with the visualizer commit (b), so the render/audio
-    // mode flags are refused rather than silently ignored. Inert knobs
-    // (--fps, --size, --timeout, …) stay legal and are ignored.
-    if (map.is_some() || set.is_some())
-        && (headless || probe || latency_test || testcard || audio.is_some() || no_audio)
-    {
+    // --map/--set (commit b) load AND render: the render/audio flags
+    // are wired — --headless (one still frame of the map view),
+    // --testcard (replaces the map view), --audio (overrides the map's
+    // own audio) and --no-audio (forced degraded wall clock) are legal
+    // alongside. The live diagnostics stay refused: --probe needs a
+    // live desktop to probe and --latency-test a live audio stream to
+    // tap through — neither says anything about a loaded map. Inert
+    // knobs (--fps, --size, --timeout, …) stay legal and are used or
+    // ignored per mode.
+    if (map.is_some() || set.is_some()) && (probe || latency_test) {
         return Err(
-            "--map/--set load the timeline and exit (this commit); the render and audio wiring land with the visualizer commit — drop the render/audio flags"
+            "--probe/--latency-test are live diagnostics and cannot run with --map/--set"
                 .to_owned(),
         );
     }
@@ -362,11 +382,6 @@ where
             }
         }
     };
-
-    // The test card is the whole point of a headless render in phase 1.
-    if headless {
-        testcard = true;
-    }
 
     Ok(Args {
         headless,
@@ -587,16 +602,26 @@ mod tests {
         // difficulty — there is nothing to select).
         assert!(args(&["--diff", "Normal"]).is_err());
         assert!(args(&["--map", "x.osu", "--diff", "Normal"]).is_err());
-        // --map/--set (this commit) load and exit — render/audio flags
-        // conflict until the visualizer commit wires them.
-        for flag in ["--headless", "--testcard", "--probe", "--latency-test"] {
+        // --map/--set (commit b) load AND render — the render/audio
+        // flags are wired: --headless, --testcard, --audio and
+        // --no-audio are legal alongside (Δ-F opened the matrix); the
+        // live diagnostics stay refused.
+        for flag in ["--probe", "--latency-test"] {
             assert!(args(&["--map", "x.osu", flag]).is_err(), "--map + {flag}");
             assert!(args(&["--set", "1", flag]).is_err(), "--set + {flag}");
         }
-        assert!(args(&["--map", "x.osu", "--audio", "y.mp3"]).is_err());
-        assert!(args(&["--set", "1", "--audio", "y.mp3"]).is_err());
-        assert!(args(&["--map", "x.osu", "--no-audio"]).is_err());
-        assert!(args(&["--set", "1", "--no-audio"]).is_err());
+        assert!(args(&["--map", "x.osu", "--headless"]).is_ok());
+        assert!(args(&["--set", "1", "--headless"]).is_ok());
+        assert!(args(&["--map", "x.osu", "--testcard"]).is_ok());
+        assert!(args(&["--set", "1", "--testcard", "--headless"]).is_ok());
+        let a = args(&["--map", "x.osu", "--audio", "y.mp3"]).unwrap();
+        assert_eq!(a.audio, Some(PathBuf::from("y.mp3")));
+        assert!(args(&["--set", "1", "--no-audio"]).is_ok());
+        // --headless stays a still frame: the live-mode audio flags
+        // conflict with it whether or not a map is loaded (Δ-F opened
+        // --map/--set + --headless, not --headless + --audio).
+        assert!(args(&["--map", "x.osu", "--headless", "--audio", "y.mp3"]).is_err());
+        assert!(args(&["--map", "x.osu", "--headless", "--no-audio"]).is_err());
         // Library operations refuse to share one run.
         assert!(args(&["--map", "x.osu", "--import", "m.osz"]).is_err());
         assert!(args(&["--set", "1", "--import", "m.osz"]).is_err());
@@ -667,10 +692,17 @@ mod tests {
     }
 
     #[test]
-    fn headless_implies_testcard_and_no_timeout() {
+    fn headless_has_no_forced_testcard_and_no_timeout() {
+        // Δ-F (ruling 2026-11-19): --headless no longer implies
+        // --testcard (phase 1 forced it — the test card was the whole
+        // point of a headless render then); the still frame still
+        // carries no timeout.
         let a = args(&["--headless"]).unwrap();
-        assert!(a.headless && a.testcard);
+        assert!(a.headless && !a.testcard);
         assert_eq!(a.timeout, None);
+        // the scale pattern is explicit now
+        let a = args(&["--headless", "--testcard"]).unwrap();
+        assert!(a.testcard);
     }
 
     #[test]

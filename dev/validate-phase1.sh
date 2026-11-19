@@ -64,7 +64,7 @@ test -x "$BIN"
 
 # ------------------------------------------------------------------ 1. headless
 say "1. headless PNG (logical 1920x1080 @ scale 1.25 -> buffer 2400x1350)"
-"$BIN" --headless --size 1920x1080 --scale 1.25 --out /tmp/hyprbeat-p1-125.png
+"$BIN" --headless --testcard --size 1920x1080 --scale 1.25 --out /tmp/hyprbeat-p1-125.png
 test -s /tmp/hyprbeat-p1-125.png
 echo "wrote /tmp/hyprbeat-p1-125.png ($(stat -c%s /tmp/hyprbeat-p1-125.png) bytes)"
 ask "open it in an image viewer — look for: pink 2px border, faint 1px grid, concentric rings right of centre, checker strip along the bottom, vertical pink band. All present and straight? (Enter alone = no) [y/N] "
