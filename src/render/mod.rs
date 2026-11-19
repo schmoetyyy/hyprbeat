@@ -7,7 +7,9 @@
 //! split and the uniform discipline stay.
 
 pub mod headless;
+pub mod pipeline;
 pub mod scale;
+pub mod timeline;
 
 use crate::Error;
 use crate::config::theme::{self, Color};
