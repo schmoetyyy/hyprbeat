@@ -18,6 +18,24 @@ attrs — re-running this script reproduces byte-identical fixtures.
                   songs/unsubmitted/<hash8>/ (D-43)
   oversize.osz    honest .osu + huge.wav whose CENTRAL directory declares
                   600 MiB (cap: 512 MiB, D-44) — must fail BEFORE any write
+  timeline.osz    set 20261119 (Δ-J, the visualizer fixture): Normal +
+                  Hard + tone.wav. Normal is the hand-computed corrected-
+                  §7.3 case: circles t=0/500, slider t=2000 length 300
+                  slides 2 (SliderMultiplier 2.0, beatLength 500,
+                  inherited -50 at t=1000 → SV 2.0 → 300/(100·2·2)·500 =
+                  375 ms/slide, 750 ms total → 2000..2750), spinner
+                  3000..4200, kiai 4000..8000 clamped to the span →
+                  objects=4 circles=2 sliders=1 spinners=1 kiai=1 span
+                  0..4200. Hard (invented the same way): circles
+                  t=0/250/500/750, slider t=1500 length 300 slides 1 →
+                  1500..1875, spinner 2500..3700, kiai 3000..8000 →
+                  clamped (3000, 3700) → objects=6 circles=4 sliders=1
+                  spinners=1 kiai=1 span 0..3700. Entry names carry the
+                  sort digit because the manifest (and so the loader's
+                  "first difficulty") is ENTRY-NAME order — Normal must be
+                  first so `--diff Hard` exercises the exact-match path.
+                  tone.wav = tiny_wav(128) (distinct byte count from the
+                  other fixtures' audio: no cross-set canonical dedup).
 """
 
 import os
@@ -28,6 +46,7 @@ import zipfile
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 ZIP_DATE = (2026, 11, 15, 0, 0, 0)  # fixed for determinism
 SET_ID = 20261115
+TIMELINE_SET_ID = 20261119  # Δ-J: invented (I-03), dated like the others
 
 
 def osu_text(diff: str, set_id: int) -> bytes:
@@ -46,6 +65,44 @@ def osu_text(diff: str, set_id: int) -> bytes:
         "CircleSize:3\n"
         "OverallDifficulty:6\n"
         "ApproachRate:8\n"
+    ).encode()
+
+
+def timeline_osu(version: str, beatmap_id: int, timing: str, objects: str) -> bytes:
+    """A full visualizer-fixture difficulty (unlike `osu_text`'s metadata
+    stubs): General/Metadata/Difficulty/TimingPoints/HitObjects, modeled on
+    assets/golden/v14-standard.osu. `SliderMultiplier: 2.0` + the caller's
+    timing/objects make every duration hand-computable via the corrected
+    §7.3 formula (length / (100 · SM · SV) · beatLength per slide)."""
+    return (
+        "osu file format v14\n"
+        "\n"
+        "[General]\n"
+        "AudioFilename: tone.wav\n"
+        "AudioLeadIn: 0\n"
+        "Mode: 0\n"
+        "\n"
+        "[Metadata]\n"
+        "Title: Timeline Fixture\n"
+        "Artist: Fixture Artist\n"
+        "Creator: hyprbeat\n"
+        f"Version: {version}\n"
+        f"BeatmapID: {beatmap_id}\n"
+        f"BeatmapSetID: {TIMELINE_SET_ID}\n"
+        "\n"
+        "[Difficulty]\n"
+        "HPDrainRate: 5\n"
+        "CircleSize: 4\n"
+        "OverallDifficulty: 8\n"
+        "ApproachRate: 9\n"
+        "SliderMultiplier: 2.0\n"
+        "SliderTickRate: 1\n"
+        "\n"
+        "[TimingPoints]\n"
+        f"{timing}\n"
+        "\n"
+        "[HitObjects]\n"
+        f"{objects}\n"
     ).encode()
 
 
@@ -155,6 +212,48 @@ def main() -> int:
         # different byte count than submitted.osz's audio: the two fixtures
         # must not dedup into each other's canonical copies across sets
         ("audio.wav", tiny_wav(96)),
+    ])
+
+    # Δ-J: the visualizer validation fixture (docstring above). Timing:
+    # t=0 uninherited beatLength 500; t=1000 inherited -50 → SV 2.0 (in
+    # force for both sliders); kiai on at 4000 (Normal) / 3000 (Hard),
+    # off at 8000 — past the span end, so the window clamps to it.
+    normal_timing = (
+        "0,500,4,2,0,60,1,0\n"
+        "1000,-50,4,2,0,60,0,0\n"
+        "4000,-50,4,2,0,60,0,1\n"
+        "8000,-50,4,2,0,60,0,0"
+    )
+    # circles t=0/500; slider t=2000, L 176→476 (= 300 px = the length
+    # field), slides 2 → 375 ms/slide → 2000..2750; spinner 3000..4200.
+    normal_objects = (
+        "256,192,0,1,0,0:0:0:0:\n"
+        "256,192,500,1,0,0:0:0:0:\n"
+        "176,192,2000,2,0,L|476:192,2,300\n"
+        "256,192,3000,12,0,4200,0:0:0:0:"
+    )
+    hard_timing = (
+        "0,500,4,2,0,60,1,0\n"
+        "1000,-50,4,2,0,60,0,0\n"
+        "3000,-50,4,2,0,60,0,1\n"
+        "8000,-50,4,2,0,60,0,0"
+    )
+    # circles t=0/250/500/750; slider t=1500 slides 1 → 1500..1875;
+    # spinner 2500..3700.
+    hard_objects = (
+        "256,192,0,1,0,0:0:0:0:\n"
+        "256,192,250,1,0,0:0:0:0:\n"
+        "256,192,500,1,0,0:0:0:0:\n"
+        "256,192,750,1,0,0:0:0:0:\n"
+        "176,192,1500,2,0,L|476:192,1,300\n"
+        "256,192,2500,12,0,3700,0:0:0:0:"
+    )
+    write_zip(os.path.join(FIXTURES, "timeline.osz"), [
+        ("Fixture Artist - Timeline Fixture 1 (hyprbeat) [Normal].osu",
+         timeline_osu("Normal", 20261121, normal_timing, normal_objects)),
+        ("Fixture Artist - Timeline Fixture 2 (hyprbeat) [Hard].osu",
+         timeline_osu("Hard", 20261122, hard_timing, hard_objects)),
+        ("tone.wav", tiny_wav(128)),
     ])
 
     hand_rolled_oversize(os.path.join(FIXTURES, "oversize.osz"))

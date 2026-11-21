@@ -5,7 +5,13 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-16 (phase 3, session 4: commit 6 `1192a6e` =
+> **Last updated**: 2026-11-19 (phase 3, session 5: the timeline visualizer
+> LANDED — commit a `d3abcd4` + b1 `b68652e` + b2 `e7bf95b`, dev-machine
+> gates green at each — `cargo test --lib` 173/180/183; commit c = this docs
+> record (§7.3 ×100 correction, §6/D-20 stale-line updates, session-5
+> record + Δ registry) + the committed `dev/fixtures/timeline.osz` (Δ-J) +
+> `dev/validate-phase3-visualizer.sh` (Δ-G). Phase-3 exit validation
+> PENDING. Session 4 (2026-11-16) was: commit 6 `1192a6e` =
 > index schema v2 LANDED (D-45 per-set manifests + `resolve_set` loader) +
 > D-37 amended (output-buffer default 256 → 512 — one-machine capture-tap
 > crackle finding, [REVISITABLE]) + the mixer callback-size invariance test;
@@ -43,12 +49,14 @@
 > the plan review); D-45 user-ruled ACCEPT (per-set manifest, index
 > v2 — §9).
 > **Current phase**: 3 — **IN PROGRESS** (parser + corpus + library index +
-> `.osz` import library + import CLI + index v2 with per-set manifests done;
-> §10 row 3). Real-specimen validation ran 2026-11-16 — Q-10 CLOSED (§14).
-> Next: the timeline visualizer, opened with a DESIGN ROUND (plan → user
-> OK → code); it consumes the already-landed D-45 `resolve_set` loader
-> (§9/§5.2); then phase-3 exit validation. Specimen paths stay outside the
-> repo (I-03).
+> `.osz` import library + import CLI + index v2 with per-set manifests +
+> the timeline visualizer (commits a/b1/b2) done; §10 row 3).
+> Real-specimen validation ran 2026-11-16 — Q-10 CLOSED (§14); its
+> cold-start/full-RSS halves ride the visualizer script. Next: phase-3
+> exit validation — run `dev/validate-phase3-visualizer.sh` (synthetic
+> suite; `OSZ_SPECIMEN=` adds the live y/N + the Q-10 halves: cold start
+> cache-warm ≤ 2 s, full-budget RSS ≤ 150 MB) and paste the results.
+> Specimen paths stay outside the repo (I-03).
 > 2026-11-14 audit note: this header was six commits stale (it still said
 > phase 2 "awaiting validation run 2" — §13 item 4 had lapsed since
 > `851e68b`). The same pass fixed: the Phase-2 close-out commit chain
@@ -564,8 +572,11 @@ Implementation notes:
   overrides it. Implement via serde `#[serde(flatten)]` intermediate struct.
 - Config struct is `Arc<RwLock<Config>>` (`parking_lot`); render reads it
   every frame, watcher writes rarely. No per-field atomics.
-- CLI overrides via `clap` (add to stack in phase 5): `--volume`, `--config`,
-  `--map <path>` for dev testing.
+- CLI overrides via `clap` (add to stack in phase 5): `--volume`, `--config`.
+  Updated 2026-11-19: `--map <path>` was listed here as a future clap flag —
+  stale since the phase-3 visualizer landed it (with `--set`/`--diff`) as a
+  hand-rolled flag, ruling 2026-11-17 (see D-20); clap still brings only the
+  config-file flags.
 - **First run**: missing `config.toml` → write fully-commented default (§5.3),
   then load it.
 
@@ -617,8 +628,22 @@ implementing.
 - **Perfect (P)**: circle through first three points; more than three
   points degrade the curve to bezier (wiki-verified 2026-11-13 —
   phase 6 replicates that degradation, not "ignore extras").
-- **Length**: slider duration = `length / (SliderMultiplier · SV) · beatLength`
-  with SV from the active inherited timing point.
+- **Length** — **corrected 2026-11-17 (user ruling; the original wording is
+  quoted below — §13 hard rule)**: ONE slide (span) of a slider lasts
+  `span_ms = length / (SliderMultiplier × 100 × SV) × beatLength` and the
+  whole slider `span_ms × slides`, with SV from the active inherited timing
+  point (`SV = -100 / inherited beatLength`) and beatLength = ms per beat of
+  the active uninherited point. The ×100 is the unit conversion: §5.1
+  defines `SliderMultiplier` as the base slider velocity in **hundreds of
+  osu-px per beat**, so the travel velocity is `SliderMultiplier × 100 × SV`
+  osu-px per beat. The corrected arithmetic landed in `beatmap::timeline`
+  (`slider_span_ms`, pinned by a hand-computed unit test: length 300,
+  SliderMultiplier 2.0, SV 2.0, beatLength 500 → 375 ms per slide —
+  visualizer commit a) and in the committed fixture
+  `dev/fixtures/timeline.osz` (Δ-J). The original text read:
+  > **Length**: slider duration = `length / (SliderMultiplier · SV) ·
+  > beatLength` with SV from the active inherited timing point.
+  which is 100× too long (the same numbers give 37 500 ms per slide).
 - Convert every path to a **polyline with equidistant arc-length
   parameterization** (sample ~2 osu-px steps, build a cumulative-length LUT,
   binary-search the LUT for `pos_at(d)`). Follow ball, ticks, and rendering all
@@ -754,7 +779,7 @@ scoring math (§11 I-09), never in the live game.
 | D-17 | Output scale follows the compositor; user config exposes only `ui_scale` and a perf-only `[render] scale` override (clamped) | Wayland-correct: client-side "DPI" settings fight the compositor → blur / mis-sized rendering. |
 | D-18 | Mouse speed = software sensitivity multiplier on pointer deltas (NOT a DPI setting); hardware DPI is the user's mouse config. Default `raw_input = true` bypasses compositor acceleration for predictable aim. Sensitivity applies only in PLAYING, never in wallpaper passthrough. | Wayland clients cannot set mouse DPI (that's hardware/libinput). What rhythm players want — "1 pad unit = N osu!px" — is a sensitivity multiplier; raw input removes inter-compositor aim inconsistency. |
 | D-19 | Product name is `hyprbeat` (was working title "beatpaper"). Settled pre-code while the rename is free. | Satisfies D-09/I-04 (no "osu"). Aware of namespace overlap with Hyprland's `hyprpaper` (Vaxry's wallpaper daemon — different function: rhythm game vs static wallpaper); accepted the association as net-positive ecosystem fit. Do not re-litigate without a concrete conflict (trademark claim or documented user confusion). |
-| D-20 | Phase-1 CLI is a minimal hand-rolled parser (`--headless --timeout --size --scale --out --testcard --probe --fps`); clap still lands in phase 5 with the config flags (§6). Phase 3 extended it with `--import PATH` / `--library-root DIR` (§5.2) — still clap-free | §4 "keep the dependency tree small"; every phase-1 flag is a dev/diagnostic flag |
+| D-20 | Phase-1 CLI is a minimal hand-rolled parser (`--headless --timeout --size --scale --out --testcard --probe --fps`); clap still lands in phase 5 with the config flags (§6). Phase 3 extended it with `--import PATH` / `--library-root DIR` (§5.2) — still clap-free. Updated 2026-11-19: the visualizer commits extended the phase-3 CLI scope further — `--map PATH` / `--set KEY` / `--diff NAME` (ruling 2026-11-17, Δ-L's strict per-flag split) plus their render/audio wiring in commit b2 (`--audio` override, `--no-audio`, `--headless` still-frame, Δ-F) — still clap-free | §4 "keep the dependency tree small"; every phase-1 flag is a dev/diagnostic flag |
 | D-21 | Live rendering = one wgpu surface per output created over raw Wayland handles; fractional scale = buffer `round(logical×scale)` mapped 1:1 onto logical size via `wp_viewporter` source/dest; without viewporter, fall back to `wl_surface.set_buffer_scale(round(scale))` + warn. The wgpu 30 instance is handed the `wl_display` (`InstanceDescriptor::display`) so the GLES backend can present on Wayland. | Pixel-correct fractional scaling (D-17/I-11); wgpu-30-specific requirement discovered during the phase-1 build |
 | D-22 | Wallpaper surfaces default to an EMPTY input region + `keyboard_interactivity=none` (pointer passthrough, I-13); `--probe` temporarily maps full input + `on_demand` to measure Q-1/Q-2 from the live desktop | Phase 1 must never eat desktop input; the probe doubles as the §14 instrument |
 | D-23 | Frame loop: render only inside frame callbacks; idle cap by skipping with an EMPTY commit (some compositors only fire callbacks after a commit); a 250 ms watchdog re-requests callbacks (occlusion ⇒ callbacks stop ⇒ ~0 % CPU is expected and logged once) | §3.5 made concrete + self-healing; whether the empty commits are actually needed on Hyprland is Q-3 |
@@ -790,7 +815,7 @@ scoring math (§11 I-09), never in the live game.
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
 | **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ✅ **DONE (2026-11-12, run 2 at commit 851e68b): dev/validate-phase2.sh = 14/14.** Music sync (user y) and degraded amber band (user y). Q-8 answered: stream `rate=44100 channels=2` — the file's native rate accepted (mono source duplicated to stereo), clock counts the file's samples. §5.2 cache: miss→hit verified, entries under `~/.cache/hyprbeat/decoded/<sha256>.f32` (layout bug fixed en route: `cache_path` had written at the cache root, so the script's wipe never took effect). Pause/rebase: freeze at 1931 ms, final 4933 (expected ≈4931). D-37 live: `buffer=fixed-256`, observed callback period 1.33 ms (was 32 ms device default). §3.6: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 / p95 2.60 ms (≤ 25 ms — PASS, Q-9 estimate); tap→flash p50 13.31 / p95 35.06 ms. Benches: mix 512-frame stereo 2.15 µs (0.16 % of the 1.33 ms period); clock time_ms 1.75 ns; pause+resume 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms (one-shot, off-RT). En-route fixes: D-37/D-38 script greps, E0382 in `build_stream` (D-39), cache layout. Optional spot checks (cold start ≤ 2 s, RSS ≤ 150 MB, CPU ≤ 2 %) closed 2026-11-13 (warm-up run; numbers + caveat in close-out) |
-| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`; committed `f4d1cb7` and PUSHED — dev-machine gates green, 143 tests). Session 3 (2026-11-15): commit 5 = import CLI (`--import PATH`/`--library-root DIR` + `run_cli` + D-38 log/exit contract) + `dev/validate-phase3-import.sh` (22 synthetic checks green in the producing sandbox against a clone of `f4d1cb7`; real-specimen section rides `OSZ_SPECIMEN`, Q-10) + committed fixtures (`dev/fixtures/`, generator committed — user-OK'd at the plan review); D-45 user-ruled ACCEPT (§9). Session 4 (2026-11-16): commit 6 `1192a6e` = D-45 index v2 LANDED (per-set manifests, v1-reads-as-v2, `resolve_set` loader — ahead of the visualizer) + D-37 amended (buffer default 256 → 512: one-machine capture-tap crackle finding, [REVISITABLE]) + mixer callback-size invariance test — dev-machine gates green (fmt/clippy clean, 157 tests, script 25/0/1, bench no regression: mix 512-frame 2.13 µs) + commit 7 = the docs record (CONTEXT.md only). Real-specimen validation RAN: Q-10 CLOSED (set 2536560 — script 30/0/0; synthetic 25/0/1). Next: the timeline visualizer, opened with a DESIGN ROUND (plan → user OK → code; consumes the landed D-45 loader; specimen paths stay outside the repo, I-03) → phase-3 exit validation |
+| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`; committed `f4d1cb7` and PUSHED — dev-machine gates green, 143 tests). Session 3 (2026-11-15): commit 5 = import CLI (`--import PATH`/`--library-root DIR` + `run_cli` + D-38 log/exit contract) + `dev/validate-phase3-import.sh` (22 synthetic checks green in the producing sandbox against a clone of `f4d1cb7`; real-specimen section rides `OSZ_SPECIMEN`, Q-10) + committed fixtures (`dev/fixtures/`, generator committed — user-OK'd at the plan review); D-45 user-ruled ACCEPT (§9). Session 4 (2026-11-16): commit 6 `1192a6e` = D-45 index v2 LANDED (per-set manifests, v1-reads-as-v2, `resolve_set` loader — ahead of the visualizer) + D-37 amended (buffer default 256 → 512: one-machine capture-tap crackle finding, [REVISITABLE]) + mixer callback-size invariance test — dev-machine gates green (fmt/clippy clean, 157 tests, script 25/0/1, bench no regression: mix 512-frame 2.13 µs) + commit 7 = the docs record (CONTEXT.md only). Real-specimen validation RAN: Q-10 CLOSED (set 2536560 — script 30/0/0; synthetic 25/0/1). Next: the timeline visualizer, opened with a DESIGN ROUND (plan → user OK → code; consumes the landed D-45 loader; specimen paths stay outside the repo, I-03) → phase-3 exit validation. Session 5 (2026-11-19): the visualizer LANDED — commit a `d3abcd4` (timeline load, log, exit — the D-45 loader's first consumer; 173 tests), commit b1 `b68652e` (instanced quad pipeline + timeline scene, D-05; 180 tests), commit b2 `e7bf95b` (live + headless wiring: `--audio` override, PlainWall parked / DegradedWall + amber band, Δ-F/Δ-M; 183 tests) — dev-machine gates green at each. Commit c (this docs commit): the §7.3 ×100 correction, the §6 `--map` + D-20 phase-3-CLI-scope updates, the session-5 record + Δ registry, the committed `dev/fixtures/timeline.osz` (Δ-J) + generator change, and `dev/validate-phase3-visualizer.sh` (Δ-G — the synthetic suite + the Q-10 halves behind `OSZ_SPECIMEN`). **Phase-3 exit validation RAN 2026-11-21** — synthetic suite green; real set 1049618: cold start ≈221 ms PASS, peak RSS ≈200 MiB (VmHWM 205088 kB) vs the 150 MB budget, accepted by user ruling; AudioLeadIn live and sync accuracy still unmeasured (session-5 record). |
 | **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
 | **6** | Sliders (§7.3), spinners, stacking, new-combo colours | A modern tech map plays correctly end-to-end | ⬜ |
@@ -1482,6 +1507,94 @@ after `1192a6e`).
   `validate-phase2.sh` only when audio code is touched; the
   cold-start/full-RSS spot checks (the forward-carried Q-10 halves)
   close with the visualizer.
+
+<!-- ---------------------------------------------------------------- -->
+<!-- Phase-3 session 5 record (appended 2026-11-19). -->
+
+## Phase-3 session 5 (2026-11-19) — the visualizer landed (commits a/b1/b2) + this docs record (commit c)
+
+Commits (all pushed): a `d3abcd4` (feat(beatmap): visualizer commit a —
+timeline load, log, exit — the D-45 `resolve_set` loader's first consumer)
+→ b1 `b68652e` (feat(render): visualizer commit b1 — instanced quad
+pipeline + timeline scene, D-05) → b2 `e7bf95b` (feat(visualizer): commit
+b2 — render the map: live + headless wiring). Dev-machine gates green at
+each: fmt/clippy clean, `cargo test --lib` 173 → 180 → 183 passed. Commit
+c (this commit): CONTEXT.md only on the docs side (the §7.3 ×100
+correction, the §6 `--map` + D-20 phase-3-CLI-scope updates, this record
+and the Δ registry below) plus `dev/fixtures/timeline.osz` + the
+`dev/gen_osz_fixtures.py` change (Δ-J) and `dev/validate-phase3-visualizer.sh`
+(Δ-G). Nothing under `src/` changes in commit c.
+
+### Design-round Δ registry (the visualizer's deviation ledger)
+
+| Δ | Change | Status |
+|---|---|---|
+| Δ-A | `--map` pulled forward from phase 5 into the phase-3 visualizer CLI | accepted 2026-11-17 (landed commit a) |
+| Δ-B | `--library-root` extended from `--import`-only to also root `--set` | accepted 2026-11-17 (landed commit a) |
+| Δ-C | slider duration computed from the scalar `length` field via the corrected §7.3 formula (not integrated curve length) | accepted 2026-11-17 (landed commit a) |
+| Δ-E | the map's `AudioLeadIn` applied CALLER-side (`StartOptions.lead_in_ms`); the engine maps song t=0 | accepted 2026-11-17 (landed commit b2) |
+| Δ-F | `--headless` no longer implies `--testcard`; the conflict matrix opens `--headless`/`--testcard`/`--audio`/`--no-audio` alongside `--map`/`--set` (`--probe`/`--latency-test` stay refused) | accepted 2026-11-19 (landed commit b2, with Δ-M) |
+| Δ-G | the visualizer validation script and this CONTEXT.md record land together in commit c | accepted 2026-11-19 (this commit) |
+| Δ-H | shared probing resolver for `--map`/`--set` (one spelling, filesystem probe first) | WITHDRAWN 2026-11-17 — a file named like the set key could hijack the lookup; replaced by Δ-L |
+| Δ-I | map audio matched against manifest entries EXACT, then `normalize_rel`-normalized — never basename-only | accepted 2026-11-17 (landed commit a) |
+| Δ-J | committed synthetic `dev/fixtures/timeline.osz` + the `dev/gen_osz_fixtures.py` change (every byte invented, I-03; deterministic generation, sha256-pinned in the script) | accepted 2026-11-19 (this commit) |
+| Δ-K | import.rs's `normalize_rel` made `pub(crate)` so the loader's audio match reuses the importer's exact path normalization for Δ-I (relabelled from Δ-J) | accepted 2026-11-19 (landed commit a `d3abcd4`) |
+| Δ-L | strict per-flag split: `--set` resolves through the D-45 manifest ONLY (no filesystem probe), `--map` loads ONE direct `.osu` — no fallback in either direction | accepted 2026-11-17 (landed commit a; replaces withdrawn Δ-H) |
+| Δ-M | cli.rs test renamed `headless_has_no_forced_testcard_and_no_timeout` (rides Δ-F) | accepted 2026-11-19 (landed commit b2) |
+| Δ-N | `dev/validate-phase1.sh` + `dev/validate-phase2.sh` updated for the b2 flag matrix | accepted 2026-11-19 (landed commit b2) |
+| Δ-O | `--testcard` replaces the map view (live and headless); the headless map still frame is the parked PlainWall view, never the amber band | accepted 2026-11-19 (landed commit b2 `e7bf95b`) |
+
+(Δ-D does not appear in the reviewer's commit-c registry enumeration —
+A, B, C, E, F, G, H withdrawn, I, J, K, L, M, N, O; the quad-pipeline
+work the writer's truncated notes had labelled Δ-D landed in commit b1 as
+approved plan.)
+
+### Results (dev machine, user-observed 2026-11-19 — nothing else is claimed)
+
+- Headless PNG of `assets/golden/v14-standard.osu`: all object types,
+  orientation and the parked playhead correct.
+- Loader summary (golden): `objects=10 circles=4 sliders=4 spinners=2
+  kiai=1` span 0..8500, `audio=none`.
+- Live, no audio: playhead parked, no amber band.
+- Live `--no-audio`: playhead sweeps, degraded path logged.
+- Live with `--audio assets/test-tone.wav`: audio clock `degraded=false`,
+  playhead moved and stopped at the right end, no amber band.
+- Real set (kept outside the repo, I-03), imported into a scratch library:
+  set=1049618, 3 difficulties, first difficulty used with a warning
+  listing all, `objects=129 circles=72 sliders=56 spinners=1 kiai=1`
+  `span_start_ms=11705`, audio resolved from the manifest, music played,
+  playhead parked ~10 s then moved with the music, no amber band.
+
+### Q-10 and exit validation (dev machine, user-run 2026-11-21 — nothing else is claimed)
+
+- `dev/validate-phase3-visualizer.sh` full run: 49 passed, 1 failed (RSS, below), 0 skipped. Steps 0b–6 all PASS, including the script's own fmt/clippy/test gates. The script's pins were corrected by the reviewer before this run: the loader logs spans as f64 (`span_start_ms=0.0 span_end_ms=8500.0`) and the stub set's refusal text is `has no playable .osu`.
+- Real specimen (kept outside the repo, I-03): set 1049618, diff `i came`: `objects=129 circles=72 sliders=56 spinners=1 kiai=1`, `span_start_ms=11705.0`, audio resolved from the manifest, audio clock clean (`degraded=false`, no amber band).
+- Live visuals: the user answered `y` at the script's prompt. The prompt precedes the 30 s run (script ordering defect, open item below).
+- Cold start cache-warm: ≈221 ms (≤ 2 s) PASS, served from the decode cache.
+- RSS: script run peak VmRSS 202120 kB, VmHWM 205088 kB → FAIL against ≤ 150 MB. Isolation runs (one run each): with audio VmHWM 204544 kB cold / 198716 kB warm; `--no-audio` VmHWM 63256 kB; no-map `--audio assets/test-tone.wav` VmHWM 62292 kB (matches phase 2's 61.7 MiB). The growth is tied to the song being loaded; map, timeline and quad pipeline cost ≈ 0–2 MB. Mechanism not established (hypothesis, unverified: about two decoded copies at peak). The song length was not recorded; memory is expected to scale with it.
+- Ruling (user, 2026-11-21): ≈ 200 MB peak for a full song is accepted for phase 3; the 150 MB figure is not met. `src/audio` was not touched in phase 3 (Δ-E).
+
+### Not yet measured
+
+- AudioLeadIn live (Δ-E is unit-tested; no live lead-in observation yet).
+- Sync accuracy (playhead-vs-music measured, not only observed).
+
+### Open items
+
+- `dev/validate-phase3-visualizer.sh` asks its y/N before the live run instead of after: move the `ask` behind the run.
+- Audio memory: measure how the decoded song is held (copies, resample, cache read) before changing anything.
+
+**Phase-3 exit status: CLOSED by user ruling 2026-11-21** — Q-10 cold start PASS, RSS above the original 150 MB budget and accepted; AudioLeadIn live and sync accuracy carried forward.
+
+### Handoff notes for the next session
+
+- Phase 4 next (§10). Carried: the script y/N ordering, AudioLeadIn live check, sync-accuracy measurement, audio-memory investigation (Open items above).
+- The timeline fixture's expected summaries are pinned by the script and
+  derived in `dev/gen_osz_fixtures.py`'s docstring: Normal `objects=4
+  circles=2 sliders=1 spinners=1 kiai=1` span 0..4200 (slider 2000..2750 =
+  375 ms/slide × 2, kiai 4000..8000 clamped), Hard `objects=6 circles=4
+  sliders=1 spinners=1 kiai=1` span 0..3700 (slider 1500..1875, kiai
+  3000..8000 clamped).
 
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
 Check §10, do the next unfinished phase (phase 3), keep the invariants,
