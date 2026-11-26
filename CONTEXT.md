@@ -5,7 +5,26 @@
 > completely before writing a single line of code. Decisions recorded here are
 > final unless explicitly marked `[REVISITABLE]`.
 >
-> **Last updated**: 2026-11-19 (phase 3, session 5: the timeline visualizer
+> **Last updated**: 2026-11-27 (phase 4, commit a RE-DELIVERED after review
+> round B: module lives under `src/game/` per §5 and the module name is
+> `game`; rev-A point 3 boundary enforced — a tap at exactly `t + w50`
+> is a 50 and a miss fires only when `t' − t > w50` strictly, the same
+> expression the tap check uses; the fail latch rules — once HP
+> reaches 0.0 (miss or drain, including a drain inside `tap()`), no
+> later hit raises HP or score, exposed as `failed()`; corrected pins
+> (miss_resets_combo counts (6,0,0,1), case-A drain_time_s 2.0,
+> full-sequence HP after 50@4120 = 0.8615 — the active drain ends at the
+> span end); E0277 + the two clippy rewrites fixed; `cargo fmt` runs on
+> the integration side, not hand-applied here). Before that, 2026-11-26
+> (phase 4, session 1: design round closed — plan
+> rev C approved with rulings Q-A..Q-K; commit a = the judgement core
+> (Δ-P/Δ-Q/Δ-R/Δ-S/Δ-T + Δ-AJ accepted — gates and test
+> counts run on the dev machine at apply time and are recorded there, not
+> here); §10 phase-3 row flipped to DONE per the 2026-11-21 ruling; the
+> phase-4 Δ registry lives in the phase-4 record below; Δ-AK ruled:
+> relative pointer events are focus-bound, auto-pause when the pointer
+> leaves all hyprbeat surfaces, no pointer lock in phase 4). Before that,
+> 2026-11-19 (phase 3, session 5: the timeline visualizer
 > LANDED — commit a `d3abcd4` + b1 `b68652e` + b2 `e7bf95b`, dev-machine
 > gates green at each — `cargo test --lib` 173/180/183; commit c = this docs
 > record (§7.3 ×100 correction, §6/D-20 stale-line updates, session-5
@@ -379,10 +398,14 @@ src/
 │   └── slider.rs         path math: Catmull-Rom / perfect arcs / linear,
 │                         equidistant arc-length reparam, slider ticks
 ├── game/
-│   ├── mod.rs            state machine (Demo/Playing/Paused)
-│   ├── rules.rs          AR/CS/OD/HP formulas (§7.2), timing windows
-│   ├── logic.rs          hit detection, judgement, combo, HP, score
-│   ├── autoplay.rs       demo bot (always-perfect at T-0; grade target config)
+│   ├── mod.rs            module facade — the phase-4 judgement core
+│   ├── judge.rs          §7.2 formulas as pure functions: Q-A windows,
+│   │                     circle radius, AR preempt/fade
+│   ├── score.rs          ScoreV1 + accuracy + HP stand-ins, the fail
+│   │                     latch, hit-error stats (§7.2, Q-C/Q-D/Q-E)
+│   ├── session.rs        DrainPlan + GameplayCore: taps, notelock,
+│   │                     miss deadlines, drain over active windows
+│   ├── autoplay.rs       demo bot (always-perfect at T-0; grade target config; phase 7)
 │   └── stacking.rs       note-stack offset algorithm (phase 6)
 ├── render/
 │   ├── mod.rs            wgpu init, frame loop, damage/throttle policy
@@ -815,8 +838,8 @@ scoring math (§11 I-09), never in the live game.
 | **0** | Architecture (this document) | CONTEXT.md complete | ✅ **DONE** |
 | **1** | Cargo project, layer-shell surface, render loop, frame callbacks | Gradient/textured surface on Hyprland background, `--headless` PNG works, correct at 125% fractional scale | ✅ **DONE (2026-11-12, Hyprland 0.57.1)** — gradient live at 100 % (~27.4 fps @ 30 cap, 165 Hz output); test card sharp at 100 % AND 125 %; headless PNG confirmed; probes on an empty workspace: pointer enter/buttons, relative deltas (4596), sustained keys (65) — Q-1/Q-2/Q-6 PASS (D-28; D-27 superseded). 2 live render bugs fixed en route (D-26, frame-gate mix-up). §3.6 budgets: visible 0.7–1.0 % of one core across all runs (≤ 2 % — PASS), RAM 53 MB engine-only (≤ 150 MB — PASS), cold start ~0.3 s (≤ 2 s — PASS), occluded ≈ visible ≈ 1 % — the "~0 % free pause" is falsified on Hyprland 0.57.1 (D-29/Q-7; callbacks keep flowing under verified true fullscreen); real pause duty → phase 7 mode switch. |
 | **2** | Audio engine: cpal callback, clock, decode cache, mixer, universal offset | Wallpaper animation synced to music; pause/rebase correct; degraded wall-clock path tested | ✅ **DONE (2026-11-12, run 2 at commit 851e68b): dev/validate-phase2.sh = 14/14.** Music sync (user y) and degraded amber band (user y). Q-8 answered: stream `rate=44100 channels=2` — the file's native rate accepted (mono source duplicated to stereo), clock counts the file's samples. §5.2 cache: miss→hit verified, entries under `~/.cache/hyprbeat/decoded/<sha256>.f32` (layout bug fixed en route: `cache_path` had written at the cache root, so the script's wipe never took effect). Pause/rebase: freeze at 1931 ms, final 4933 (expected ≈4931). D-37 live: `buffer=fixed-256`, observed callback period 1.33 ms (was 32 ms device default). §3.6: tap→mixed p50 0.64 / p95 1.27 ms; tap→sound p50 1.98 / p95 2.60 ms (≤ 25 ms — PASS, Q-9 estimate); tap→flash p50 13.31 / p95 35.06 ms. Benches: mix 512-frame stereo 2.15 µs (0.16 % of the 1.33 ms period); clock time_ms 1.75 ns; pause+resume 5.02 ns; resample 10 s stereo 44.1k→48k 30.8 ms (one-shot, off-RT). En-route fixes: D-37/D-38 script greps, E0382 in `build_stream` (D-39), cache layout. Optional spot checks (cold start ≤ 2 s, RSS ≤ 150 MB, CPU ≤ 2 %) closed 2026-11-13 (warm-up run; numbers + caveat in close-out) |
-| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | **IN PROGRESS** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`; committed `f4d1cb7` and PUSHED — dev-machine gates green, 143 tests). Session 3 (2026-11-15): commit 5 = import CLI (`--import PATH`/`--library-root DIR` + `run_cli` + D-38 log/exit contract) + `dev/validate-phase3-import.sh` (22 synthetic checks green in the producing sandbox against a clone of `f4d1cb7`; real-specimen section rides `OSZ_SPECIMEN`, Q-10) + committed fixtures (`dev/fixtures/`, generator committed — user-OK'd at the plan review); D-45 user-ruled ACCEPT (§9). Session 4 (2026-11-16): commit 6 `1192a6e` = D-45 index v2 LANDED (per-set manifests, v1-reads-as-v2, `resolve_set` loader — ahead of the visualizer) + D-37 amended (buffer default 256 → 512: one-machine capture-tap crackle finding, [REVISITABLE]) + mixer callback-size invariance test — dev-machine gates green (fmt/clippy clean, 157 tests, script 25/0/1, bench no regression: mix 512-frame 2.13 µs) + commit 7 = the docs record (CONTEXT.md only). Real-specimen validation RAN: Q-10 CLOSED (set 2536560 — script 30/0/0; synthetic 25/0/1). Next: the timeline visualizer, opened with a DESIGN ROUND (plan → user OK → code; consumes the landed D-45 loader; specimen paths stay outside the repo, I-03) → phase-3 exit validation. Session 5 (2026-11-19): the visualizer LANDED — commit a `d3abcd4` (timeline load, log, exit — the D-45 loader's first consumer; 173 tests), commit b1 `b68652e` (instanced quad pipeline + timeline scene, D-05; 180 tests), commit b2 `e7bf95b` (live + headless wiring: `--audio` override, PlainWall parked / DegradedWall + amber band, Δ-F/Δ-M; 183 tests) — dev-machine gates green at each. Commit c (this docs commit): the §7.3 ×100 correction, the §6 `--map` + D-20 phase-3-CLI-scope updates, the session-5 record + Δ registry, the committed `dev/fixtures/timeline.osz` (Δ-J) + generator change, and `dev/validate-phase3-visualizer.sh` (Δ-G — the synthetic suite + the Q-10 halves behind `OSZ_SPECIMEN`). **Phase-3 exit validation RAN 2026-11-21** — synthetic suite green; real set 1049618: cold start ≈221 ms PASS, peak RSS ≈200 MiB (VmHWM 205088 kB) vs the 150 MB budget, accepted by user ruling; AudioLeadIn live and sync accuracy still unmeasured (session-5 record). |
-| **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | ⬜ |
+| **3** | `.osz`/`.osu` parse, golden tests, library index, hash dedup | Map loads; circles+timing visible on timeline (visualizer) | ✅ **DONE (user ruling 2026-11-21 — ≈200 MB RSS accepted over the 150 MB budget; open items stay listed and carried)** — session 1 (2026-11-14): parser (`31e6175`, D-40) + golden corpus (`5c61c05`) landed. Session 2 (2026-11-15): D-41 ruled (REFERENCE, §9) + library index landed (`a579ca1`: XDG dirs I-07, `index.json` D-13 v1, SHA-256 dedup, D-41 reference + dangling repair; serde/serde_json pulled forward per §4) + refactor commit A `24707a1` (`refactor: clippy fixes for rust-version 1.88`: `rust-version` 1.85→1.88 ahead of `zip 9.6`'s MSRV floor + the 10 clippy hits at 1.88 fixed as 8 behavior-preserving rewrites; applied on the dev machine — gates green, 128 tests, Wayland smoke pass) + commit 4 = `.osz` zip import library (`src/beatmap/import.rs` + D-42 replace-on-update in `osz.rs`: allowlist filter, set-id routing, unsubmitted `unsubmitted/<hash8>` dirs, fail-before-write caps — D-43/D-44; `zip 9.6`; committed `f4d1cb7` and PUSHED — dev-machine gates green, 143 tests). Session 3 (2026-11-15): commit 5 = import CLI (`--import PATH`/`--library-root DIR` + `run_cli` + D-38 log/exit contract) + `dev/validate-phase3-import.sh` (22 synthetic checks green in the producing sandbox against a clone of `f4d1cb7`; real-specimen section rides `OSZ_SPECIMEN`, Q-10) + committed fixtures (`dev/fixtures/`, generator committed — user-OK'd at the plan review); D-45 user-ruled ACCEPT (§9). Session 4 (2026-11-16): commit 6 `1192a6e` = D-45 index v2 LANDED (per-set manifests, v1-reads-as-v2, `resolve_set` loader — ahead of the visualizer) + D-37 amended (buffer default 256 → 512: one-machine capture-tap crackle finding, [REVISITABLE]) + mixer callback-size invariance test — dev-machine gates green (fmt/clippy clean, 157 tests, script 25/0/1, bench no regression: mix 512-frame 2.13 µs) + commit 7 = the docs record (CONTEXT.md only). Real-specimen validation RAN: Q-10 CLOSED (set 2536560 — script 30/0/0; synthetic 25/0/1). Next: the timeline visualizer, opened with a DESIGN ROUND (plan → user OK → code; consumes the landed D-45 loader; specimen paths stay outside the repo, I-03) → phase-3 exit validation. Session 5 (2026-11-19): the visualizer LANDED — commit a `d3abcd4` (timeline load, log, exit — the D-45 loader's first consumer; 173 tests), commit b1 `b68652e` (instanced quad pipeline + timeline scene, D-05; 180 tests), commit b2 `e7bf95b` (live + headless wiring: `--audio` override, PlainWall parked / DegradedWall + amber band, Δ-F/Δ-M; 183 tests) — dev-machine gates green at each. Commit c (this docs commit): the §7.3 ×100 correction, the §6 `--map` + D-20 phase-3-CLI-scope updates, the session-5 record + Δ registry, the committed `dev/fixtures/timeline.osz` (Δ-J) + generator change, and `dev/validate-phase3-visualizer.sh` (Δ-G — the synthetic suite + the Q-10 halves behind `OSZ_SPECIMEN`). **Phase-3 exit validation RAN 2026-11-21** — synthetic suite green; real set 1049618: cold start ≈221 ms PASS, peak RSS ≈200 MiB (VmHWM 205088 kB) vs the 150 MB budget, accepted by user ruling; AudioLeadIn live and sync accuracy still unmeasured (session-5 record). |
+| **4** | Hit detection, judgement windows, combo/HP/score, hitsounds; pointer input (`wl_pointer` + `zwp_relative_pointer_v1`, §6 `[input]`) | Fully playable circles-only map; score/Acc/HP live | **IN PROGRESS** — session 1 (2026-11-26): design round closed (plan rev C — rulings Q-A..Q-K + correction rounds). Commit a = the judgement core + unit pins (Δ-P..Δ-T + Δ-AJ — registry in the phase-4 record below), re-delivered 2026-11-27 after review round B (module path `src/game/`, rev-A point 3 boundary, fail latch — see the phase-4 record). Commits b–e pending: render scene, input pipeline + CLI stand-ins, `--play` lifecycle + hitsounds, validation script. |
 | **5** | Config system (§6 exactly), presets, hot reload, CLI flags | Edit config.toml live → theme/layout changes without restart | ⬜ |
 | **6** | Sliders (§7.3), spinners, stacking, new-combo colours | A modern tech map plays correctly end-to-end | ⬜ |
 | **7** | Mode switching, autoplay bot, `hyprbeat-ctl` socket, keybind docs | Click desktop → play; focus loss → pause; demo mode visible; socket `0700` + same-uid only | ⬜ |
@@ -1596,6 +1619,87 @@ approved plan.)
   sliders=1 spinners=1 kiai=1` span 0..3700 (slider 1500..1875, kiai
   3000..8000 clamped).
 
+---
+
+## Phase-4 session 1 (2026-11-26) — design round closed; commit a: judgement core
+
+Design round (three revisions, A/B/C): plan approved by the user on
+2026-11-26 with rulings Q-A..Q-K and two final corrections — (1) the
+drain pins (the circle@1000→slider@3000 gap is exactly 2000 ms → an
+inferred break by the ≥ rule; case A active drain is (4000, 5000] only,
+HP 0.5 → 0.475; case B's sub-2000 gap tests the slider exclusion alone,
+0.5 → 0.425), and (2) relative motion is focus-bound (per the
+zwp_relative_pointer_v1 protocol XML: it shares wl_pointer's focus and
+only emits events while focused) → Δ-AK: auto-pause when the pointer
+leaves ALL hyprbeat surfaces (moving between our own outputs must not
+pause), no pointer lock in phase 4, live checks cover multi-monitor /
+bar-under-cursor / focus-follows-mouse. `src/audio` stays untouched by
+the whole phase.
+
+### Phase-4 Δ registry
+
+| Δ | Change | Status |
+|---|---|---|
+| Δ-P | Simplified notelock (Q-B): time-ordered earliest unjudged playable object with an open window is the only eligible target; taps that judge nothing are ignored (no ghost miss) | accepted 2026-11-26 — commit a |
+| Δ-Q | HP stand-ins (Q-E): 300 +0.05 / 100 +0.03 / 50 +0.01 / miss −0.10; passive drain 5e-6 × HPDrainRate per ms of ACTIVE drain time | accepted 2026-11-26 — commit a |
+| Δ-R | ACTIVE drain windows (HP) = object span − inferred breaks − non-circle intervals; separate from the multiplier's drain time (span − breaks, all objects) | accepted 2026-11-26 — commit a |
+| Δ-S | ScoreV1 pinned to the live-wiki form (Q-C: C = max(combo_before − 1, 0); Q-D: wiki difficulty multiplier, raw values, nomod, f64, no floor) | accepted 2026-11-26 — commit a |
+| Δ-T | Breaks inferred from object gaps ≥ BREAK_GAP_MS (2000 ms); `[Events]` stays unparsed — `[REVISITABLE]` when a later phase parses it | accepted 2026-11-26 — commit a |
+| Δ-AJ | Delivery shape: every commit carries its own CONTEXT.md update; README flag docs land in the commit adding the flags (c: input flags, d: --play) | accepted 2026-11-26 — commit a |
+| Δ-U | Tap keys matched by raw evdev keycodes 44 (KEY_Z) / 45 (KEY_X) — layout-independent (QWERTZ keysyms y/x); §6 key_main/key_alt strings remain phase-5 semantics | approved 2026-11-26 — commit c |
+| Δ-V | D-05 texture atlas not built in phase 4; circles/rings stay SDF quads in the atlas-free pipeline; atlas deferred to skin support / phase 8 | approved 2026-11-26 — commit b |
+| Δ-W | --play rides --map/--set: a play session without phase-7 mode switching; states PLAYING/PAUSED/FAILED/FINISHED; refuses --headless | approved 2026-11-26 — commit d |
+| Δ-X | --play defaults to no timeout (D-24 carve-out); explicit --timeout (incl. 0) still wins | approved 2026-11-26 — commit d |
+| Δ-Y | Lifecycle: SIGUSR2 after fail/finish = full restart with lead-in; unpause = 1 s countdown with frozen clock; playfield click resumes/restarts (consumed, reclaims keyboard focus); taps inert outside PLAYING | approved 2026-11-26 — commit d |
+| Δ-Z | Hitsound layering: hitnormal always plays; each addition (whistle/finish/clap) as its own mixer voice (wiki-cited); miss fires nothing | approved 2026-11-26 — commit d |
+| Δ-AA | wl_pointer buttons as taps: BTN_LEFT/BTN_RIGHT only; all other buttons ignored | approved 2026-11-26 — commit c |
+| Δ-AB | T3 focus-loss auto-pause pulled forward into --play (Q-H) | approved 2026-11-26 — commit d |
+| Δ-AC | Sliders/spinners in --play: inert, not rendered, one warn line with counts (Q-G); visualizer unchanged | approved 2026-11-26 — commit d |
+| Δ-AD | Ring quads (Q-J): approach + judgement rings as ring-shaped SDF quads | approved 2026-11-26 — commit b |
+| Δ-AE | HUD bars/pips stand-ins (Q-I): HP bar, accuracy-distribution bar, score fill vs theoretical max, combo pips; exact values only in the exit-summary log (D-35 posture) | approved 2026-11-26 — commit b |
+| Δ-AF | CLI stand-ins for §6 [input]: --invert-horizontal, --invert-vertical, --edge-clamp/--no-edge-clamp, --absolute-mouse, --mouse-sensitivity (default 1.0, I-13) | approved 2026-11-26 — commit c |
+| Δ-AG | Latency instrumentation reroute: tap→dispatch and tap→photon stamps; phase-2's tap→flash p95 35.06 ms "queue-depth" explanation recorded as hypothesis, not finding | approved 2026-11-26 — commit e |
+| Δ-AH | New log lines: startup tap-keys line (raw 44/45 + layout note), first-press keysym observation, exit summary with mean signed hit error + p50/p95, inert-object warn | approved 2026-11-26 — commits c/d |
+| Δ-AI | dev/validate-phase4-play.sh + synthetic circles-only gameplay fixtures land with the docs/test commit | approved 2026-11-26 — commit e |
+| Δ-AK | Relative motion IS focus-bound (zwp_relative_pointer_v1 shares wl_pointer's focus — protocol XML): auto-pause when the pointer leaves ALL hyprbeat surfaces (moving between our own outputs must NOT pause); NO pointer lock in phase 4 | ruled 2026-11-26 — commits c/d/e |
+
+Commit a (this commit) implements Δ-P, Δ-Q, Δ-R, Δ-S, Δ-T under Δ-AJ's
+per-commit docs discipline: `src/game/{mod,judge,score,session}.rs`
+plus the `lib.rs` module wiring — §7.2 windows as inclusive half-widths
+(Q-A) + circle radius + AR preempt/fade (fix 1: AR10 fade-in 300 ms);
+ScoreState (ScoreV1 with the wiki difficulty multiplier, §7.2 accuracy,
+Q-E HP constants + drain, the fail latch, hit-error stats for the exit
+summary); DrainPlan (Δ-T break inference, Δ-R active windows vs
+multiplier drain time); GameplayCore (the tap / advance state machine:
+Δ-P notelock head resolution, misses only strictly past t + w50,
+drain over active windows). Pure std, zero I/O (I-09), no new
+dependencies; no src/audio, wayland or render changes. Unit pins cover
+every boundary: inclusive windows at exact edges, break-gap == 2000
+exactly, the tap-at-exact-deadeline boundary (rev-A point 3), notelock
+head resolution, the position gate, the fail latch (miss path, drain
+path, and drain-emptying-HP-inside-tap), and drain cases A/B from the
+rev-C corrections. Gates and test counts run on the dev machine at
+apply time and are recorded there, not here.
+
+Review round B (2026-11-27, applied before the first commit): commit
+(a)'s delivery was rejected at apply/verify time and re-delivered —
+(1) E0277 `f64::from(u64)` in the multiplier's objects term → the
+parameter is `u32`; (2) clippy −D warnings rewrites: `collapsible_if`
+in `merge_intervals` (let chain, edition 2024) and `while_let_loop` in
+`advance`; (3) three wrong test expectations against correct code:
+`miss_resets_combo` counts are (6,0,0,1), case-A `drain_time_s` is
+2.0 (span − breaks = 4 s − 2 s), and the full-sequence HP after
+50@4120 is 0.8615 (the active drain ends at the span end 4000 — the
+[4000, 4120] slice contributes nothing); (4) rev-A point 3 enforced:
+a tap at exactly `t + w50` is a 50 and a miss fires only when
+`t' − t > w50` strictly — `advance` breaks on the same `≤ w50`
+expression the tap check uses, and the module docs/tests follow; (5)
+the fail latch (point above) added to the core and exposed as
+`failed()`; (6) the module moved from `src/gameplay/` to `src/game/`
+(module `game`, this §5 tree). The delivery is not hand-formatted for
+rustfmt — `cargo fmt` runs on the integration side and is recorded in
+the commit message there.
+
 *End of CONTEXT.md. If you are an AI session reading this: welcome back.
-Check §10, do the next unfinished phase (phase 3), keep the invariants,
+Check §10, do the next unfinished phase (phase 4), keep the invariants,
 leave the file better than you found it.*

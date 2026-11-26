@@ -6,13 +6,14 @@
 //! can reach the modules; the binary in `main.rs` is a thin shell over them
 //! (§12.3 benches, phase 2).
 //!
-//! Phase status (CONTEXT.md §10): 1–2 DONE, 3 in progress — beatmap parser
-//! (`beatmap`) landed first; .osz import + timeline visualizer next.
+//! Phase status (CONTEXT.md §10): 1–3 DONE, 4 in progress — the judgement
+//! core (`game`) landed first; render/input wiring next.
 
 pub mod audio;
 pub mod beatmap;
 pub mod cli;
 pub mod config;
+pub mod game;
 pub mod render;
 pub mod wayland;
 
